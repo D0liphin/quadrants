@@ -162,6 +162,13 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
       size_t shared_array_bytes = tensor_type->get_num_elements() * data_type_size(tensor_type->get_element_type());
 
       llvm::Type *shared_array_type;
+      // Linkage of the addrspace(3) shared global. Static (sized) shared scratch is emitted as an internal
+      // *definition* (undef init) rather than an external declaration: in whole-program compilation ptxas ignores the
+      // extern qualifier (warns "Unresolved extern variable ... ignoring extern qualifier"), but the `.extern .shared`
+      // form is an unresolved symbol under relocatable device linking (`ptxas -c` + `cuLink`), which the
+      // per-construct-cubin path (migration D/E) requires. Dynamic shared memory (zero-sized, runtime-sized at launch)
+      // is inherently `extern __shared__` and must stay external.
+      llvm::GlobalValue::LinkageTypes shared_linkage = llvm::GlobalValue::InternalLinkage;
       if (shared_array_bytes > cuda_dynamic_shared_array_threshold_bytes) {
         if (dynamic_shared_array_bytes > 0) {
           /* Current version only allows one dynamic shared array allocation,
@@ -193,13 +200,16 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
         auto element_type = tlctx->get_data_type(tensor_type->get_element_type());
         shared_array_type = llvm::ArrayType::get(element_type, 0);
         dynamic_shared_array_bytes += shared_array_bytes;
+        shared_linkage = llvm::GlobalValue::ExternalLinkage;  // dynamic shared mem: inherently extern
       } else {
         shared_array_type = tlctx->get_data_type(tensor_type);
       }
 
-      auto base = new llvm::GlobalVariable(*module, shared_array_type, false, llvm::GlobalValue::ExternalLinkage,
-                                           nullptr, fmt::format("shared_array_t{}_s{}", task_codegen_id, stmt->id),
-                                           nullptr, llvm::GlobalVariable::NotThreadLocal, 3 /*addrspace=shared*/);
+      llvm::Constant *shared_init =
+          (shared_linkage == llvm::GlobalValue::InternalLinkage) ? llvm::UndefValue::get(shared_array_type) : nullptr;
+      auto base = new llvm::GlobalVariable(*module, shared_array_type, false, shared_linkage, shared_init,
+                                           fmt::format("shared_array_t{}_s{}", task_codegen_id, stmt->id), nullptr,
+                                           llvm::GlobalVariable::NotThreadLocal, 3 /*addrspace=shared*/);
       base->setAlignment(llvm::MaybeAlign(8));
       auto ptr_shared_array_type = llvm::PointerType::get(shared_array_type, 0);
       llvm_val[stmt] = builder->CreatePointerCast(base, ptr_shared_array_type);
