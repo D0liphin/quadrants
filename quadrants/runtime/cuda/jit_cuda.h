@@ -66,6 +66,9 @@ class JITSessionCUDA : public JITSession {
                  ProgramImpl *program_impl);
   JITModule *add_module(std::unique_ptr<llvm::Module> M, int max_reg) override;
   JITModule *add_module_culink(std::vector<std::unique_ptr<llvm::Module>> modules, int max_reg) override;
+  // Slice 1b: return a relocatable cubin for one self-contained construct module, hitting a disk cache keyed by the
+  // module's LLVM-IR hash (skips PTX + ptxas on a warm unchanged construct).
+  std::vector<char> get_or_build_construct_cubin(std::unique_ptr<llvm::Module> &module);
   llvm::DataLayout get_data_layout() override;
 
  private:

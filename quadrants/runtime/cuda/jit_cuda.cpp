@@ -1,4 +1,6 @@
+#include <atomic>
 #include <chrono>
+#include <iterator>
 #include <random>
 #include <vector>
 
@@ -277,21 +279,101 @@ JITModule *JITSessionCUDA::add_module(std::unique_ptr<llvm::Module> M, int max_r
   return modules.back().get();
 }
 
+// Slice 1b: emit a *relocatable* cubin from PTX via `ptxas -c` (shell-out prototype; production would link
+// libnvptxcompiler_static). Relocatable is mandatory: executable cubins can't be re-linked by cuLink (err 209, slice
+// 2). Temp files under the system temp dir, cleaned up.
+static std::vector<char> ptx_to_relocatable_cubin(const std::string &ptx, const std::string &arch) {
+  namespace fs = std::filesystem;
+  static std::atomic<uint64_t> ctr{0};
+  auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+  auto stem = fmt::format("qd_culink_{}_{}", (unsigned long long)now, ctr.fetch_add(1));
+  auto ptx_path = fs::temp_directory_path() / (stem + ".ptx");
+  auto cubin_path = fs::temp_directory_path() / (stem + ".cubin");
+  {
+    std::ofstream o(ptx_path, std::ios::binary);
+    o.write(ptx.data(), (std::streamsize)ptx.size());
+  }
+  auto cmd = fmt::format("ptxas -c -arch={} {} -o {} 2>/dev/null", arch, ptx_path.string(), cubin_path.string());
+  int rc = std::system(cmd.c_str());
+  QD_ERROR_IF(rc != 0, "ptxas -c failed (rc={}) arch={}", rc, arch);
+  std::ifstream in(cubin_path, std::ios::binary);
+  std::vector<char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  std::error_code ec;
+  fs::remove(ptx_path, ec);
+  fs::remove(cubin_path, ec);
+  return bytes;
+}
+
+// Slice 1b: per-construct relocatable-cubin disk cache keyed by the module's LLVM-IR hash (same key basis as PtxCache).
+// A warm run with an unchanged construct hits the cache and skips PTX + ptxas entirely. Directory from
+// QD_CULINK_CUBIN_DIR, else <offline_cache>/culink_cubins, else /tmp/qd_culink_cubins.
+std::vector<char> JITSessionCUDA::get_or_build_construct_cubin(std::unique_ptr<llvm::Module> &module) {
+  namespace fs = std::filesystem;
+  std::string dir = []() {
+    const char *e = std::getenv("QD_CULINK_CUBIN_DIR");
+    return e != nullptr ? std::string(e) : std::string();
+  }();
+  if (dir.empty())
+    dir = config_.offline_cache_file_path.empty() ? "/tmp/qd_culink_cubins"
+                                                   : (config_.offline_cache_file_path + "/culink_cubins");
+  std::error_code ec;
+  fs::create_directories(dir, ec);
+
+  std::string llvm_ir_str;
+  llvm::raw_string_ostream os(llvm_ir_str);
+  module->print(os, nullptr);
+  os.flush();
+  std::string key = ptx_cache_->make_cache_key(llvm_ir_str, config_.fast_math);
+  auto cubin_path = fs::path(dir) / (key + ".cubin");
+
+  if (fs::exists(cubin_path)) {
+    std::ifstream in(cubin_path, std::ios::binary);
+    return std::vector<char>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  }
+  auto ptx = compile_module_to_ptx(module);
+  auto cubin = ptx_to_relocatable_cubin(ptx, CUDAContext::get_instance().get_mcpu());
+  // atomic-ish write via temp + rename so concurrent builders don't read a partial cubin
+  auto tmp = cubin_path.string() + fmt::format(".tmp{}", (unsigned long long)std::chrono::steady_clock::now()
+                                                              .time_since_epoch()
+                                                              .count());
+  {
+    std::ofstream o(tmp, std::ios::binary);
+    o.write(cubin.data(), (std::streamsize)cubin.size());
+  }
+  fs::rename(tmp, cubin_path, ec);
+  if (ec)
+    fs::remove(tmp, ec);
+  return cubin;
+}
+
 JITModule *JITSessionCUDA::add_module_culink(std::vector<std::unique_ptr<llvm::Module>> modules, int max_reg) {
   // Per-construct-cubin path (migration D/E, WIP, slice 1a): emit PTX per self-contained sub-module and assemble one
   // CUmodule by device-linking them via cuLink. This slice feeds PTX inputs (driver ptxas each, no relocatable-cubin
   // cache yet) to validate the multi-input cuLink + multi-entry launch-by-name path in-tree. Slice 1b swaps PTX inputs
   // for cached relocatable cubins (`ptxas -c` + CU_JIT_INPUT_CUBIN) so unchanged constructs skip ptxas.
+  constexpr uint32 kCuJitInputCubin = 0;
   constexpr uint32 kCuJitInputPtx = 1;
   constexpr uint32 kCuJitErrorLogBuffer = 5;
   constexpr uint32 kCuJitErrorLogBufferSizeBytes = 6;
   auto &drv = CUDADriver::get_instance();
 
-  std::vector<std::string> ptxs;
-  ptxs.reserve(modules.size());
+  // QD_CULINK_CUBIN=1: emit a cached relocatable cubin per construct (ptxas -c) and feed CU_JIT_INPUT_CUBIN so an
+  // unchanged construct skips PTX + ptxas (slice 1b). Default (unset): feed PTX inputs (slice 1a; driver ptxas each).
+  static const bool use_cubin = []() {
+    const char *e = std::getenv("QD_CULINK_CUBIN");
+    return e != nullptr && std::string(e) == "1";
+  }();
+
+  std::vector<std::string> ptxs;   // slice 1a path
+  std::vector<std::vector<char>> cubins;  // slice 1b path
   auto t_ptx0 = Time::get_time();
-  for (auto &m : modules) {
-    ptxs.push_back(compile_module_to_ptx(m));
+  if (use_cubin) {
+    for (auto &m : modules)
+      cubins.push_back(get_or_build_construct_cubin(m));
+  } else {
+    ptxs.reserve(modules.size());
+    for (auto &m : modules)
+      ptxs.push_back(compile_module_to_ptx(m));
   }
   auto t_ptx1 = Time::get_time();
 
@@ -314,12 +396,15 @@ JITModule *JITSessionCUDA::add_module_culink(std::vector<std::unique_ptr<llvm::M
 
   void *link = nullptr;
   QD_ERROR_IF(drv.link_create.call(n_lopt, link_opts, link_optvals, &link), "cuLinkCreate (culink-pertask) failed");
-  for (int i = 0; i < (int)ptxs.size(); i++) {
-    auto name = fmt::format("construct_{}.ptx", i);
-    auto e = drv.link_add_data.call(link, kCuJitInputPtx, (void *)ptxs[i].data(), ptxs[i].size(), name.c_str(), 0,
-                                    nullptr, nullptr);
+  int n_inputs = use_cubin ? (int)cubins.size() : (int)ptxs.size();
+  for (int i = 0; i < n_inputs; i++) {
+    uint32 in_type = use_cubin ? kCuJitInputCubin : kCuJitInputPtx;
+    void *data = use_cubin ? (void *)cubins[i].data() : (void *)ptxs[i].data();
+    std::size_t sz = use_cubin ? cubins[i].size() : ptxs[i].size();
+    auto name = fmt::format("construct_{}", i);
+    auto e = drv.link_add_data.call(link, in_type, data, sz, name.c_str(), 0, nullptr, nullptr);
     if (e != 0)
-      QD_ERROR("cuLinkAddData(PTX) construct {} failed err={} log=[{}]", i, e, err_log.data());
+      QD_ERROR("cuLinkAddData construct {} failed err={} log=[{}]", i, e, err_log.data());
   }
   void *cubin = nullptr;
   std::size_t cubin_sz = 0;
@@ -335,8 +420,8 @@ JITModule *JITSessionCUDA::add_module_culink(std::vector<std::unique_ptr<llvm::M
     return e != nullptr && std::string(e) == "1";
   }();
   if (phase_time) {
-    QD_INFO("[phase-time] culink-pertask n_modules={} llvm_to_ptx_all={:.1f}ms linked_cubin={:.1f}KB",
-            (int)modules.size(), (t_ptx1 - t_ptx0) * 1000, cubin_sz / 1024.0);
+    QD_INFO("[phase-time] culink-pertask mode={} n_modules={} cubin_build_all={:.1f}ms linked_cubin={:.1f}KB",
+            use_cubin ? "cubin-cache" : "ptx", (int)modules.size(), (t_ptx1 - t_ptx0) * 1000, cubin_sz / 1024.0);
   }
 
   this->modules.push_back(std::make_unique<JITModuleCUDA>(cuda_module));
