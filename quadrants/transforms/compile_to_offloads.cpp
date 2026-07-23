@@ -191,6 +191,155 @@ void run_construct_timing(IRNode *ir, const std::string &kname, const char *wher
       kname, where, n, total_stmts, modified_constructs, total, order.empty() ? 0.0 : order[0].first, under_100,
       under_500, under_2000, top);
 }
+
+// S2a post-offload GlobalTemporary cross-construct census (env QD_CONSTRUCT_GT_CENSUS=1). Diagnostic only. This is the
+// catch-1 feasibility gate for the per-construct split: after offload, all cross-*task* data flow is carried through
+// global-temp slots (offload::PromoteIntermediateToGlobalTmp). For each global-temp offset it records which tasks
+// write vs read it, maps every task back to its originating top-level construct via the pre-offload owner map
+// (instance_id -> construct), and unions constructs joined by a shared slot. If the union-find collapses the kernel
+// into a few giant "super-constructs", per-construct caching wins evaporate; if groups stay small/many, the split is
+// viable. `owner`/`n_constructs` are captured on the flat top-level block just before offload.
+void run_offload_gt_census(IRNode *ir, const std::unordered_map<int, int> &owner, int n_constructs,
+                           const std::vector<char> &c_is_loop, const std::vector<int> &c_stmts,
+                           const std::string &kname) {
+  auto *root = ir->cast<Block>();
+  if (root == nullptr) {
+    QD_INFO("[gt-census] kernel={} SKIP(root-not-block)", kname);
+    return;
+  }
+  std::vector<OffloadedStmt *> tasks;
+  for (auto &s : root->statements)
+    if (auto *o = s->cast<OffloadedStmt>())
+      tasks.push_back(o);
+  const int T = (int)tasks.size();
+
+  // task -> originating construct: majority vote over body stmts carrying a known pre-offload owner. -1 => no owned
+  // stmt (a pure promotion prologue / runtime-synthesized task, e.g. a serial slot-init).
+  std::vector<int> task_c(T, -1);
+  int prologue_tasks = 0;
+  std::vector<std::vector<Stmt *>> body(T);
+  for (int t = 0; t < T; t++) {
+    body[t] = irpass::analysis::gather_statements(tasks[t], [](Stmt *) { return true; });
+    std::map<int, int> votes;
+    for (auto *s : body[t]) {
+      auto it = owner.find(s->instance_id);
+      if (it != owner.end())
+        votes[it->second]++;
+    }
+    int best = -1, bestv = 0;
+    for (auto &kv : votes)
+      if (kv.second > bestv) {
+        bestv = kv.second;
+        best = kv.first;
+      }
+    task_c[t] = best;
+    if (best < 0)
+      prologue_tasks++;
+  }
+
+  // global-temp offset -> writer tasks / reader tasks (GlobalStore=write, GlobalLoad=read, AtomicOp=both).
+  std::map<std::size_t, std::set<int>> writers, readers;
+  auto note = [&](Stmt *ptr, int t, bool is_write, bool is_read) {
+    if (auto *g = ptr->cast<GlobalTemporaryStmt>()) {
+      if (is_write)
+        writers[g->offset].insert(t);
+      if (is_read)
+        readers[g->offset].insert(t);
+    }
+  };
+  for (int t = 0; t < T; t++)
+    for (auto *s : body[t]) {
+      if (auto *st = s->cast<GlobalStoreStmt>())
+        note(st->dest, t, true, false);
+      else if (auto *ld = s->cast<GlobalLoadStmt>())
+        note(ld->src, t, false, true);
+      else if (auto *at = s->cast<AtomicOpStmt>())
+        note(at->dest, t, true, true);
+    }
+
+  // union-find over constructs joined by a shared global-temp offset (cross-construct edge).
+  std::vector<int> uf(std::max(n_constructs, 0));
+  for (int i = 0; i < n_constructs; i++)
+    uf[i] = i;
+  std::function<int(int)> find = [&](int x) { return uf[x] == x ? x : uf[x] = find(uf[x]); };
+
+  std::set<std::size_t> all_offsets;
+  for (auto &kv : writers)
+    all_offsets.insert(kv.first);
+  for (auto &kv : readers)
+    all_offsets.insert(kv.first);
+  long long cross_task = 0, cross_construct = 0, prologue_sourced = 0;
+  std::vector<int> fanout;  // #distinct constructs touching each cross-construct offset (hub vs chain)
+  for (auto off : all_offsets) {
+    std::set<int> ts(writers[off].begin(), writers[off].end());
+    ts.insert(readers[off].begin(), readers[off].end());
+    if (ts.size() > 1)
+      cross_task++;
+    std::set<int> cs;
+    bool has_prologue = false;
+    for (int t : ts) {
+      if (task_c[t] < 0)
+        has_prologue = true;
+      else
+        cs.insert(task_c[t]);
+    }
+    if (has_prologue)
+      prologue_sourced++;
+    if (cs.size() > 1) {
+      cross_construct++;
+      fanout.push_back((int)cs.size());
+      int base = *cs.begin();
+      for (int c : cs)
+        uf[find(base)] = find(c);
+    }
+  }
+  std::sort(fanout.begin(), fanout.end(), std::greater<>());
+  int fanout_gt2 = 0;
+  for (int f : fanout)
+    if (f > 2)
+      fanout_gt2++;
+  std::string ftop;
+  for (size_t i = 0; i < std::min((size_t)6, fanout.size()); i++)
+    ftop += std::to_string(fanout[i]) + " ";
+
+  // Per-group stats, weighting by real recompile cost: count loop-constructs and sum their statements per group. The
+  // group with the most loops (and the one with the most statements) bounds the worst-case single-edit recompile.
+  std::map<int, int> group_size, group_loops, group_stmts;
+  for (int i = 0; i < n_constructs; i++) {
+    int r = find(i);
+    group_size[r]++;
+    if (!c_is_loop.empty() && c_is_loop[i])
+      group_loops[r]++;
+    if (!c_stmts.empty())
+      group_stmts[r] += c_stmts[i];
+  }
+  int largest = 0, grouped_constructs = 0, total_loops = 0;
+  for (auto &kv : group_size) {
+    largest = std::max(largest, kv.second);
+    if (kv.second > 1)
+      grouped_constructs += kv.second;
+  }
+  for (int i = 0; i < n_constructs; i++)
+    if (!c_is_loop.empty() && c_is_loop[i])
+      total_loops++;
+  int max_group_loops = 0, loops_in_multi = 0, max_group_stmts = 0;
+  for (auto &kv : group_loops) {
+    max_group_loops = std::max(max_group_loops, kv.second);
+    if (group_size[kv.first] > 1)
+      loops_in_multi += kv.second;
+  }
+  for (auto &kv : group_stmts)
+    if (group_size[kv.first] > 1)
+      max_group_stmts = std::max(max_group_stmts, kv.second);
+  QD_INFO(
+      "[gt-census] kernel={} n_constructs={} (loops={}) n_tasks={} prologue_tasks={} | gt_offsets={} cross_task={} "
+      "cross_construct={} prologue_sourced={} | super_groups={} largest_group={} constructs_in_multi_groups={} | "
+      "loops_in_multi_groups={} max_loops_in_one_group={} max_stmts_in_multi_group={} | "
+      "cross_offset_fanout(>2 constructs)={} top_fanouts=[{}]",
+      kname, n_constructs, total_loops, T, prologue_tasks, (long long)all_offsets.size(), cross_task, cross_construct,
+      prologue_sourced, (int)group_size.size(), largest, grouped_constructs, loops_in_multi, max_group_loops,
+      max_group_stmts, fanout_gt2, ftop);
+}
 }  // namespace
 
 namespace irpass {
@@ -367,8 +516,39 @@ void compile_to_offloads(IRNode *ir,
   if (construct_census)
     run_construct_census(ir, kernel->get_name(), "before_offload");
 
+  // S2a catch-1 gate: capture the flat top-level construct ownership (instance_id -> construct) just before offload,
+  // so the post-offload census can attribute each task/global-temp slot back to its originating construct.
+  static const bool gt_census = []() {
+    const char *e = std::getenv("QD_CONSTRUCT_GT_CENSUS");
+    return e != nullptr && std::string(e) == "1";
+  }();
+  std::unordered_map<int, int> gt_owner;
+  int gt_nconstructs = 0;
+  std::vector<char> gt_is_loop;
+  std::vector<int> gt_stmts;
+  if (gt_census) {
+    if (auto *b = ir->cast<Block>()) {
+      gt_nconstructs = (int)b->statements.size();
+      gt_is_loop.assign(gt_nconstructs, 0);
+      gt_stmts.assign(gt_nconstructs, 0);
+      for (int c = 0; c < gt_nconstructs; c++) {
+        Stmt *rootc = b->statements[c].get();
+        gt_owner[rootc->instance_id] = c;
+        gt_is_loop[c] =
+            (rootc->is<RangeForStmt>() || rootc->is<StructForStmt>() || rootc->is<WhileStmt>()) ? 1 : 0;
+        auto sub = irpass::analysis::gather_statements(rootc, [](Stmt *) { return true; });
+        gt_stmts[c] = (int)sub.size();
+        for (auto *s : sub)
+          gt_owner[s->instance_id] = c;
+      }
+    }
+  }
+
   irpass::offload(ir, config);
   irpass::analysis::verify_if_debug(ir, config);
+
+  if (gt_census)
+    run_offload_gt_census(ir, gt_owner, gt_nconstructs, gt_is_loop, gt_stmts, kernel->get_name());
 
   dump_ir("after_offload");
 
