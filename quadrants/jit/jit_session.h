@@ -27,6 +27,13 @@ class JITSession {
 
   virtual JITModule *add_module(std::unique_ptr<llvm::Module> M, int max_reg = 0) = 0;
 
+  // Per-construct-cubin path (migration D/E, WIP): assemble one JIT module from several self-contained sub-modules by
+  // emitting a relocatable cubin per sub-module and device-linking them (`cuLink`). Only the CUDA backend implements
+  // this; the default errors so other backends are unaffected.
+  virtual JITModule *add_module_culink(std::vector<std::unique_ptr<llvm::Module>> modules, int max_reg = 0) {
+    QD_NOT_IMPLEMENTED
+  }
+
   // virtual void remove_module(JITModule *module) = 0;
 
   virtual void *lookup(const std::string Name) {

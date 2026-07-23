@@ -3466,7 +3466,11 @@ LLVMCompiledTask LLVMCompiledTask::clone() const {
 }
 
 LLVMCompiledKernel LLVMCompiledKernel::clone() const {
-  return {tasks, llvm::CloneModule(*module)};
+  LLVMCompiledKernel result{tasks, module ? llvm::CloneModule(*module) : nullptr};
+  result.per_construct_modules.reserve(per_construct_modules.size());
+  for (auto &m : per_construct_modules)
+    result.per_construct_modules.push_back(llvm::CloneModule(*m));
+  return result;
 }
 
 }  // namespace quadrants::lang

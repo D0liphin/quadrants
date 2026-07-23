@@ -204,6 +204,10 @@ struct LLVMCompiledTask {
 struct LLVMCompiledKernel {
   std::vector<OffloadedTask> tasks;
   std::unique_ptr<llvm::Module> module{nullptr};
+  // Per-construct (currently per-task) self-contained modules for the relocatable-cubin + cuLink relink path
+  // (migration D/E, WIP). Populated only under QD_CULINK_PERTASK; empty => the JIT uses the whole-module `module`.
+  // Not serialized (prototype): a cache reload falls back to the whole-module path.
+  std::vector<std::unique_ptr<llvm::Module>> per_construct_modules;
   LLVMCompiledKernel() = default;
   LLVMCompiledKernel(LLVMCompiledKernel &&) = default;
   LLVMCompiledKernel &operator=(LLVMCompiledKernel &&) = default;

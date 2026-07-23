@@ -603,7 +603,14 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(const LLVM::Compiled
     auto *executor = get_runtime_executor();
 
     auto data = compiled.get_internal_data().compiled_data.clone();
-    auto *jit_module = executor->create_jit_module(std::move(data.module));
+    JITModule *jit_module = nullptr;
+    if (!data.per_construct_modules.empty()) {
+      // Per-construct-cubin path (migration D/E, WIP): assemble the module from self-contained per-construct
+      // sub-modules via cuLink instead of loading the whole-module PTX.
+      jit_module = executor->create_jit_module_culink(std::move(data.per_construct_modules));
+    } else {
+      jit_module = executor->create_jit_module(std::move(data.module));
+    }
 
     // Populate ctx
     ctx.jit_module = jit_module;

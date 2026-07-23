@@ -65,6 +65,7 @@ class JITSessionCUDA : public JITSession {
                  llvm::DataLayout data_layout,
                  ProgramImpl *program_impl);
   JITModule *add_module(std::unique_ptr<llvm::Module> M, int max_reg) override;
+  JITModule *add_module_culink(std::vector<std::unique_ptr<llvm::Module>> modules, int max_reg) override;
   llvm::DataLayout get_data_layout() override;
 
  private:

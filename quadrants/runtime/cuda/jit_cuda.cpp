@@ -277,6 +277,72 @@ JITModule *JITSessionCUDA::add_module(std::unique_ptr<llvm::Module> M, int max_r
   return modules.back().get();
 }
 
+JITModule *JITSessionCUDA::add_module_culink(std::vector<std::unique_ptr<llvm::Module>> modules, int max_reg) {
+  // Per-construct-cubin path (migration D/E, WIP, slice 1a): emit PTX per self-contained sub-module and assemble one
+  // CUmodule by device-linking them via cuLink. This slice feeds PTX inputs (driver ptxas each, no relocatable-cubin
+  // cache yet) to validate the multi-input cuLink + multi-entry launch-by-name path in-tree. Slice 1b swaps PTX inputs
+  // for cached relocatable cubins (`ptxas -c` + CU_JIT_INPUT_CUBIN) so unchanged constructs skip ptxas.
+  constexpr uint32 kCuJitInputPtx = 1;
+  constexpr uint32 kCuJitErrorLogBuffer = 5;
+  constexpr uint32 kCuJitErrorLogBufferSizeBytes = 6;
+  auto &drv = CUDADriver::get_instance();
+
+  std::vector<std::string> ptxs;
+  ptxs.reserve(modules.size());
+  auto t_ptx0 = Time::get_time();
+  for (auto &m : modules) {
+    ptxs.push_back(compile_module_to_ptx(m));
+  }
+  auto t_ptx1 = Time::get_time();
+
+  CUDAContext::get_instance().make_current();
+  [[maybe_unused]] auto _ = CUDAContext::get_instance().get_lock_guard();
+
+  std::vector<char> err_log(8192, 0);
+  std::size_t err_sz = err_log.size();
+  uint32 link_opts[3];
+  void *link_optvals[3];
+  int n_lopt = 0;
+  if (max_reg != 0) {
+    link_opts[n_lopt] = CU_JIT_MAX_REGISTERS;
+    link_optvals[n_lopt++] = &max_reg;
+  }
+  link_opts[n_lopt] = kCuJitErrorLogBuffer;
+  link_optvals[n_lopt++] = err_log.data();
+  link_opts[n_lopt] = kCuJitErrorLogBufferSizeBytes;
+  link_optvals[n_lopt++] = (void *)err_sz;
+
+  void *link = nullptr;
+  QD_ERROR_IF(drv.link_create.call(n_lopt, link_opts, link_optvals, &link), "cuLinkCreate (culink-pertask) failed");
+  for (int i = 0; i < (int)ptxs.size(); i++) {
+    auto name = fmt::format("construct_{}.ptx", i);
+    auto e = drv.link_add_data.call(link, kCuJitInputPtx, (void *)ptxs[i].data(), ptxs[i].size(), name.c_str(), 0,
+                                    nullptr, nullptr);
+    if (e != 0)
+      QD_ERROR("cuLinkAddData(PTX) construct {} failed err={} log=[{}]", i, e, err_log.data());
+  }
+  void *cubin = nullptr;
+  std::size_t cubin_sz = 0;
+  auto e_cmp = drv.link_complete.call(link, &cubin, &cubin_sz);
+  if (e_cmp != 0)
+    QD_ERROR("cuLinkComplete (culink-pertask) failed err={} log=[{}]", e_cmp, err_log.data());
+  void *cuda_module = nullptr;
+  QD_ERROR_IF(drv.module_load_data.call(&cuda_module, cubin), "module_load_data (culink-pertask) failed");
+  drv.link_destroy.call(link);
+
+  static const bool phase_time = []() {
+    const char *e = std::getenv("QD_PHASE_TIME");
+    return e != nullptr && std::string(e) == "1";
+  }();
+  if (phase_time) {
+    QD_INFO("[phase-time] culink-pertask n_modules={} llvm_to_ptx_all={:.1f}ms linked_cubin={:.1f}KB",
+            (int)modules.size(), (t_ptx1 - t_ptx0) * 1000, cubin_sz / 1024.0);
+  }
+
+  this->modules.push_back(std::make_unique<JITModuleCUDA>(cuda_module));
+  return this->modules.back().get();
+}
+
 llvm::DataLayout JITSessionCUDA::get_data_layout() {
   return data_layout;
 }

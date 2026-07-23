@@ -263,16 +263,39 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
     }
   }
 
+  // Per-construct-cubin path (QD_CULINK_PERTASK=1, migration D/E WIP): build a self-contained module per offloaded task
+  // (link its runtime deps + optimize) BEFORE the whole-module link consumes `data`. These flow to the CUDA JIT, which
+  // emits a relocatable cubin per module and `cuLink`s them. Kept alongside the normal whole-module `module` so the
+  // rest of the pipeline (offline cache, tasks metadata) is unchanged; the JIT chooses the path.
+  static const bool culink_pertask = []() {
+    const char *e = std::getenv("QD_CULINK_PERTASK");
+    return e != nullptr && std::string(e) == "1";
+  }();
+  std::vector<std::unique_ptr<llvm::Module>> per_construct_modules;
+  auto t_pc0 = _pt_now();
+  if (culink_pertask) {
+    for (int i = 0; i < (int)data.size(); i++) {
+      if (!data[i] || !data[i]->module)
+        continue;
+      std::vector<std::unique_ptr<LLVMCompiledTask>> one;
+      one.push_back(std::make_unique<LLVMCompiledTask>(data[i]->clone()));
+      auto linked_one = tlctx_.link_compiled_tasks(std::move(one));
+      optimize_module(linked_one.module.get());
+      per_construct_modules.push_back(std::move(linked_one.module));
+    }
+  }
   auto t_link0 = _pt_now();
   auto llvm_compiled_kernel = tlctx_.link_compiled_tasks(std::move(data));
   auto t_opt0 = _pt_now();
   optimize_module(llvm_compiled_kernel.module.get());
   auto t_end = _pt_now();
+  llvm_compiled_kernel.per_construct_modules = std::move(per_construct_modules);
   if (phase_time) {
     QD_INFO(
-        "[phase-time] kernel={} n_tasks={} pertask_compile={:.1f}ms link={:.1f}ms optimize={:.1f}ms",
-        kernel->get_name(), (int)offloads.size(), _pt_ms(t_pertask0, t_link0), _pt_ms(t_link0, t_opt0),
-        _pt_ms(t_opt0, t_end));
+        "[phase-time] kernel={} n_tasks={} pertask_compile={:.1f}ms per_construct_selfcontained={:.1f}ms(n={}) "
+        "link={:.1f}ms optimize={:.1f}ms",
+        kernel->get_name(), (int)offloads.size(), _pt_ms(t_pertask0, t_pc0), _pt_ms(t_pc0, t_link0),
+        (int)llvm_compiled_kernel.per_construct_modules.size(), _pt_ms(t_link0, t_opt0), _pt_ms(t_opt0, t_end));
   }
   return llvm_compiled_kernel;
 }
