@@ -190,6 +190,15 @@ struct DiffPtrResult {
  */
 DiffPtrResult value_diff_ptr_index(Stmt *val1, Stmt *val2);
 
+/**
+ * Canonical (base, offset) decomposition of a pointer-index value: returns {base, offset} such that
+ * `val == base + offset`, using the same direct base+offset resolution `value_diff_ptr_index` relies on. When `val`
+ * does not decompose it returns {val, 0} (its own identity), and a pure integer constant returns {nullptr, offset}.
+ * Two index values share an address component iff their canonical decompositions are equal, so this lets callers
+ * bucket same-address pointers by a content key instead of comparing every pair via `value_diff_ptr_index`.
+ */
+std::pair<Stmt *, int> value_base_and_offset(Stmt *val);
+
 std::unordered_set<Stmt *> constexpr_prop(Block *block, std::function<bool(Stmt *)> is_const_seed);
 
 void verify(IRNode *root);

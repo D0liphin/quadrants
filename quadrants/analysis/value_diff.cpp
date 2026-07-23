@@ -181,6 +181,17 @@ DiffPtrResult value_diff_ptr_index(Stmt *val1, Stmt *val2) {
   return DiffPtrResult::make_certain(std::get<2>(v1) - std::get<2>(v2));
 }
 
+std::pair<Stmt *, int> value_base_and_offset(Stmt *val) {
+  auto r = FindDirectValueBaseAndOffset::run(val);
+  if (std::get<0>(r)) {
+    // Decomposed: val == base + offset (base may be nullptr for a pure i32 constant).
+    return {std::get<1>(r), std::get<2>(r)};
+  }
+  // Undecomposable: val is its own base with zero offset, so it only matches another value that is the same
+  // statement -- mirroring value_diff_ptr_index's `val1 == val2` fast path.
+  return {val, 0};
+}
+
 }  // namespace analysis
 }  // namespace irpass
 }  // namespace quadrants::lang

@@ -10,8 +10,188 @@
 #include "quadrants/util/lang_util.h"
 #include "quadrants/codegen/ir_dump.h"
 #include <fstream>
+#include <chrono>
+#include <unordered_map>
+#include <unordered_set>
+#include <set>
+#include <map>
+#include <algorithm>
+#include <functional>
+#include <typeinfo>
+#include <string>
 
 namespace quadrants::lang {
+
+namespace {
+// S0 per-construct dependency census (env QD_CONSTRUCT_CENSUS=1). Diagnostic only. Treats each top-level statement of
+// the kernel body as one "construct" and counts operand edges that cross construct boundaries -- i.e. a statement in
+// construct B whose operand is defined in construct A. These edges are the data-flow that a per-construct split would
+// have to duplicate (const/arg sources are trivially recomputable; alloca/other sources are real coupling). Reports
+// construct counts by kind and the largest construct, so we can size the "changed construct" recompile cost.
+void run_construct_census(IRNode *ir, const std::string &kname, const char *where) {
+  auto *block = ir->cast<Block>();
+  if (block == nullptr) {
+    QD_INFO("[construct-census] kernel={} where={} SKIP(root-not-block)", kname, where);
+    return;
+  }
+  const int n = (int)block->statements.size();
+  std::unordered_map<int, int> owner;  // instance_id -> owning top-level construct index
+  std::vector<std::unordered_set<Stmt *>> members(n);
+  for (int c = 0; c < n; c++) {
+    Stmt *root = block->statements[c].get();
+    owner[root->instance_id] = c;
+    members[c].insert(root);
+    auto sub = irpass::analysis::gather_statements(root, [](Stmt *) { return true; });
+    for (auto *s : sub) {
+      owner[s->instance_id] = c;
+      members[c].insert(s);
+    }
+  }
+  auto kind_of = [](Stmt *r) -> const char * {
+    if (r->is<RangeForStmt>())
+      return "RangeFor";
+    if (r->is<StructForStmt>())
+      return "StructFor";
+    if (r->is<WhileStmt>())
+      return "While";
+    if (r->is<IfStmt>())
+      return "If";
+    if (r->is<AllocaStmt>())
+      return "Alloca";
+    if (r->is<ConstStmt>())
+      return "Const";
+    return typeid(*r).name();
+  };
+  // count inner loops nested inside a construct (to tell "one big loop" from "a loop nest region").
+  auto inner_loops = [](const std::unordered_set<Stmt *> &mem) {
+    int k = 0;
+    for (auto *s : mem)
+      if (s->is<RangeForStmt>() || s->is<StructForStmt>() || s->is<WhileStmt>())
+        k++;
+    return k;
+  };
+  int loops = 0, ifs = 0, allocas = 0, consts = 0, other = 0;
+  size_t max_members = 0;
+  std::vector<std::pair<size_t, int>> sizes;  // (member_count, construct index)
+  for (int c = 0; c < n; c++) {
+    Stmt *r = block->statements[c].get();
+    if (r->is<RangeForStmt>() || r->is<StructForStmt>() || r->is<WhileStmt>())
+      loops++;
+    else if (r->is<IfStmt>())
+      ifs++;
+    else if (r->is<AllocaStmt>())
+      allocas++;
+    else if (r->is<ConstStmt>())
+      consts++;
+    else
+      other++;
+    max_members = std::max(max_members, members[c].size());
+    sizes.emplace_back(members[c].size(), c);
+  }
+  std::sort(sizes.begin(), sizes.end(), std::greater<>());
+  std::string top;
+  for (size_t i = 0; i < std::min((size_t)3, sizes.size()); i++) {
+    int c = sizes[i].second;
+    top += "[#" + std::to_string(c) + " kind=" + kind_of(block->statements[c].get()) +
+           " stmts=" + std::to_string(sizes[i].first) + " inner_loops=" + std::to_string(inner_loops(members[c])) +
+           "] ";
+  }
+  long long cross_edges = 0, src_const = 0, src_alloca = 0, src_arg = 0, src_other = 0;
+  std::set<std::pair<int, int>> cross_pairs;
+  std::map<std::string, int> nontrivial_src_types;  // type-name histogram of non-const/non-arg cross-edge sources
+  for (int c = 0; c < n; c++) {
+    for (auto *s : members[c]) {
+      for (auto *op : s->get_operands()) {
+        if (op == nullptr)
+          continue;
+        auto it = owner.find(op->instance_id);
+        if (it == owner.end() || it->second == c)
+          continue;
+        cross_edges++;
+        cross_pairs.insert({it->second, c});
+        if (op->is<ConstStmt>())
+          src_const++;
+        else if (op->is<AllocaStmt>())
+          src_alloca++;
+        else if (op->is<ArgLoadStmt>())
+          src_arg++;
+        else {
+          src_other++;
+          nontrivial_src_types[typeid(*op).name()]++;
+        }
+      }
+    }
+  }
+  std::vector<std::pair<int, std::string>> nt;
+  for (auto &kv : nontrivial_src_types)
+    nt.emplace_back(kv.second, kv.first);
+  std::sort(nt.begin(), nt.end(), std::greater<>());
+  std::string nt_str;
+  for (size_t i = 0; i < std::min((size_t)6, nt.size()); i++)
+    nt_str += nt[i].second + "=" + std::to_string(nt[i].first) + " ";
+  QD_INFO(
+      "[construct-census] kernel={} where={} n_constructs={} (loops={} ifs={} allocas={} consts={} other={}) "
+      "max_construct_stmts={} | cross_operand_edges={} cross_pairs={} | cross_src: const={} alloca={} arg={} "
+      "nontrivial={} | top3: {}| nontrivial_src_types: {}",
+      kname, where, n, loops, ifs, allocas, consts, other, (long long)max_members, cross_edges,
+      (long long)cross_pairs.size(), src_const, src_alloca, src_arg, src_other, top, nt_str);
+}
+
+// S0b per-construct cost probe (env QD_CONSTRUCT_TIMING=1). Diagnostic only, does NOT mutate the real IR: for each
+// top-level construct it clones the construct into a throwaway wrapper block, runs merge_global_ptrs (the dominant
+// pre-offload pass, ~42% of cold compile) on the clone, and times it. Sum over constructs approximates the whole-
+// kernel merge_global_ptrs cost minus cross-construct merges; the per-construct max/min bound the "edit one loop"
+// recompile cost for this pass. Meant to be placed right before the real merge_global_ptrs call so the IR state
+// (post simplify_I/II) matches what the real pass sees.
+void run_construct_timing(IRNode *ir, const std::string &kname, const char *where) {
+  auto *block = ir->cast<Block>();
+  if (block == nullptr) {
+    QD_INFO("[construct-timing] kernel={} where={} SKIP(root-not-block)", kname, where);
+    return;
+  }
+  const int n = (int)block->statements.size();
+  Callable *callable = block->parent_callable();
+  std::vector<double> ms(n, 0.0);
+  double total = 0.0;
+  long long modified_constructs = 0, total_stmts = 0;
+  for (int c = 0; c < n; c++) {
+    auto clone = irpass::analysis::clone(block->statements[c].get());
+    Block wrapper;
+    wrapper.set_parent_callable(callable);
+    wrapper.insert(std::move(clone));
+    auto sub = irpass::analysis::gather_statements(&wrapper, [](Stmt *) { return true; });
+    total_stmts += (long long)sub.size();
+    auto t0 = std::chrono::steady_clock::now();
+    bool modified = irpass::merge_global_ptrs(&wrapper);
+    auto t1 = std::chrono::steady_clock::now();
+    if (modified)
+      modified_constructs++;
+    ms[c] = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    total += ms[c];
+  }
+  std::vector<std::pair<double, int>> order;
+  for (int c = 0; c < n; c++)
+    order.emplace_back(ms[c], c);
+  std::sort(order.begin(), order.end(), std::greater<>());
+  int under_100 = 0, under_500 = 0, under_2000 = 0;
+  for (double v : ms) {
+    if (v < 100.0)
+      under_100++;
+    if (v < 500.0)
+      under_500++;
+    if (v < 2000.0)
+      under_2000++;
+  }
+  std::string top;
+  for (size_t i = 0; i < std::min((size_t)5, order.size()); i++)
+    top += "[#" + std::to_string(order[i].second) + " " + std::to_string((long long)order[i].first) + "ms] ";
+  QD_INFO(
+      "[construct-timing] kernel={} where={} n={} total_stmts={} modified_constructs={} mgp_sum={:.0f}ms "
+      "mgp_max={:.0f}ms | constructs_under: 100ms={} 500ms={} 2000ms={} | top5: {}",
+      kname, where, n, total_stmts, modified_constructs, total, order.empty() ? 0.0 : order[0].first, under_100,
+      under_500, under_2000, top);
+}
+}  // namespace
 
 namespace irpass {
 
@@ -63,6 +243,21 @@ void compile_to_offloads(IRNode *ir,
     irpass::frontend_type_check(ir);
     irpass::lower_ast(ir);
   }
+
+  static const bool construct_census = []() {
+    const char *e = std::getenv("QD_CONSTRUCT_CENSUS");
+    return e != nullptr && std::string(e) == "1";
+  }();
+  static const bool construct_timing = []() {
+    const char *e = std::getenv("QD_CONSTRUCT_TIMING");
+    return e != nullptr && std::string(e) == "1";
+  }();
+  static const bool mgp_per_construct = []() {
+    const char *e = std::getenv("QD_MGP_PER_CONSTRUCT");
+    return e != nullptr && std::string(e) == "1";
+  }();
+  if (construct_census)
+    run_construct_census(ir, kernel->get_name(), "after_lower_ast");
 
   dump_ir("quadrants1");
   irpass::compile_quadrants_functions(ir, config, Function::IRStage::BeforeLowerAccess);
@@ -139,7 +334,28 @@ void compile_to_offloads(IRNode *ir,
   // does no pre-offload whole-kernel CSE, so we do this one cheap, pointers-only pass here instead (arithmetic is
   // already canonical after simplify_I, so a single call is enough; running it in the fixpoint was a +12-22s
   // compile regression for no extra benefit).
-  irpass::merge_global_ptrs(ir);
+  if (construct_timing)
+    run_construct_timing(ir, kernel->get_name(), "pre_merge_global_ptrs");
+  if (mgp_per_construct) {
+    // Experiment (QD_MGP_PER_CONSTRUCT=1): run the same-address pointer merge scoped to each top-level construct
+    // instead of once over the whole kernel. Extracting each construct into a standalone wrapper keeps the pass's
+    // per-elimination replace/mark-undone walk inside the construct rather than rewalking the whole top-level block,
+    // which S0b measured ~580x cheaper in sum (20ms vs 11.6s). Cross-construct same-address merges are dropped; the
+    // load-bearing within-loop read/write pointer unification is per-construct and preserved. Extract+reinsert at the
+    // same index keeps the vector stable.
+    if (auto *b = ir->cast<Block>()) {
+      for (int i = 0; i < (int)b->statements.size(); i++) {
+        Stmt *construct = b->statements[i].get();
+        Block wrapper;
+        wrapper.set_parent_callable(b->parent_callable());
+        wrapper.insert(b->extract(construct));
+        irpass::merge_global_ptrs(&wrapper);
+        b->insert(wrapper.extract(construct), i);
+      }
+    }
+  } else {
+    irpass::merge_global_ptrs(ir);
+  }
   irpass::analysis::verify_if_debug(ir, config);
 
   irpass::flag_access(ir);
@@ -147,6 +363,9 @@ void compile_to_offloads(IRNode *ir,
 
   irpass::full_simplify(ir, config, {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose, "simplify_II"});
   irpass::analysis::verify_if_debug(ir, config);
+
+  if (construct_census)
+    run_construct_census(ir, kernel->get_name(), "before_offload");
 
   irpass::offload(ir, config);
   irpass::analysis::verify_if_debug(ir, config);
