@@ -19,6 +19,7 @@
 #include <functional>
 #include <typeinfo>
 #include <string>
+#include <cstdint>
 
 namespace quadrants::lang {
 
@@ -273,6 +274,17 @@ void run_offload_gt_census(IRNode *ir, const std::unordered_map<int, int> &owner
     all_offsets.insert(kv.first);
   for (auto &kv : readers)
     all_offsets.insert(kv.first);
+  // Full sorted offset list + a checksum, to verify the offload offset assignment is deterministic across runs and to
+  // compare the default (traversal-order) vs QD_STABLE_GTMP=1 (content-keyed) policies (S2a').
+  {
+    std::string offs;
+    std::uint64_t chk = 1469598103934665603ULL;
+    for (auto o : all_offsets) {
+      offs += std::to_string(o) + ",";
+      chk = (chk ^ (std::uint64_t)o) * 1099511628211ULL;
+    }
+    QD_INFO("[gtmp-map] kernel={} n_offsets={} checksum={} offsets=[{}]", kname, (int)all_offsets.size(), chk, offs);
+  }
   long long cross_task = 0, cross_construct = 0, prologue_sourced = 0;
   std::vector<std::pair<int, std::size_t>> fanout;  // (#distinct constructs, offset) for each cross-construct slot
   for (auto off : all_offsets) {
