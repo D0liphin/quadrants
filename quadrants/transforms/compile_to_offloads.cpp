@@ -410,6 +410,59 @@ void run_offload_gt_census(IRNode *ir, const std::unordered_map<int, int> &owner
       prologue_sourced, (int)group_size.size(), largest, grouped_constructs, loops_in_multi, max_group_loops,
       max_group_stmts, fanout_gt2, ftop);
 }
+// S2b split-offload prototype (env QD_SPLIT_OFFLOAD=1). Instead of one whole-kernel offload, compile each top-level
+// construct independently and reassemble the tasks, to validate the split + relink path (correctness only; caching and
+// per-construct GT-offset coordination are separate). For each container / side-effecting top-level construct: clone
+// the whole block, drop the *other* constructs (containers / side-effecting stmts), DIE the now-unused shared scalar
+// defs (catch-2: recompute per construct), run the normal `offload` on the isolated construct, and collect its
+// OffloadedStmts. Cross-construct memory ordering is preserved by keeping tasks in original construct order; pure value
+// coupling is preserved by duplicating the defs into each clone. (Cross-construct global-temp slots are NOT yet
+// coordinated here -- kernels that need them require S2a′ shared offsets; this prototype targets constructs whose
+// offload allocates only construct-private / no global-temp slots.)
+void split_offload_per_construct(IRNode *ir, const CompileConfig &config) {
+  auto *block = ir->cast<Block>();
+  QD_ASSERT(block != nullptr);
+  const int n = (int)block->statements.size();
+  std::vector<std::unique_ptr<Stmt>> tasks;
+  for (int i = 0; i < n; i++) {
+    Stmt *target = block->statements[i].get();
+    if (!target->is_container_statement() && !target->has_global_side_effect())
+      continue;  // pure value defs produce no task; they are duplicated into each consuming construct below
+    auto cloned = irpass::analysis::clone(block);
+    auto *cb = cloned->cast<Block>();
+    cb->set_parent_callable(block->parent_callable());
+    Stmt *ctarget = cb->statements[i].get();
+    std::vector<Stmt *> to_remove;
+    for (auto &s : cb->statements) {
+      Stmt *sj = s.get();
+      if (sj != ctarget && (sj->is_container_statement() || sj->has_global_side_effect()))
+        to_remove.push_back(sj);
+    }
+    for (Stmt *sj : to_remove)
+      cb->extract(sj);
+    irpass::die(cb);
+    irpass::offload(cb, config);
+    while (!cb->statements.empty())
+      tasks.push_back(cb->extract(0));
+  }
+  int n_constructs = 0;
+  for (int i = 0; i < n; i++) {
+    Stmt *s = block->statements[i].get();
+    if (s->is_container_statement() || s->has_global_side_effect())
+      n_constructs++;
+  }
+  while (!block->statements.empty())
+    block->extract(0);
+  for (auto &t : tasks)
+    block->insert(std::move(t));
+  static const bool split_log = []() {
+    const char *e = std::getenv("QD_SPLIT_LOG");
+    return e != nullptr && std::string(e) == "1";
+  }();
+  if (split_log)
+    QD_INFO("[split-offload] top_level_stmts={} constructs_compiled={} tasks_produced={}", n, n_constructs,
+            (int)block->statements.size());
+}
 }  // namespace
 
 namespace irpass {
@@ -614,7 +667,14 @@ void compile_to_offloads(IRNode *ir,
     }
   }
 
-  irpass::offload(ir, config);
+  static const bool split_offload = []() {
+    const char *e = std::getenv("QD_SPLIT_OFFLOAD");
+    return e != nullptr && std::string(e) == "1";
+  }();
+  if (split_offload)
+    split_offload_per_construct(ir, config);
+  else
+    irpass::offload(ir, config);
   irpass::analysis::verify_if_debug(ir, config);
 
   if (gt_census)
