@@ -237,24 +237,29 @@ void run_offload_gt_census(IRNode *ir, const std::unordered_map<int, int> &owner
       prologue_tasks++;
   }
 
-  // global-temp offset -> writer tasks / reader tasks (GlobalStore=write, GlobalLoad=read, AtomicOp=both).
+  // global-temp offset -> writer tasks / reader tasks (GlobalStore=write, GlobalLoad=read, AtomicOp=both), plus the
+  // slot's data type and the set of access kinds so we can characterize each hub concretely (reduction vs flag vs bound).
   std::map<std::size_t, std::set<int>> writers, readers;
-  auto note = [&](Stmt *ptr, int t, bool is_write, bool is_read) {
+  std::map<std::size_t, std::string> off_dtype;
+  std::map<std::size_t, std::set<std::string>> off_access;
+  auto note = [&](Stmt *ptr, int t, bool is_write, bool is_read, const std::string &access) {
     if (auto *g = ptr->cast<GlobalTemporaryStmt>()) {
       if (is_write)
         writers[g->offset].insert(t);
       if (is_read)
         readers[g->offset].insert(t);
+      off_dtype[g->offset] = g->ret_type.to_string();
+      off_access[g->offset].insert(access);
     }
   };
   for (int t = 0; t < T; t++)
     for (auto *s : body[t]) {
       if (auto *st = s->cast<GlobalStoreStmt>())
-        note(st->dest, t, true, false);
+        note(st->dest, t, true, false, "store");
       else if (auto *ld = s->cast<GlobalLoadStmt>())
-        note(ld->src, t, false, true);
+        note(ld->src, t, false, true, "load");
       else if (auto *at = s->cast<AtomicOpStmt>())
-        note(at->dest, t, true, true);
+        note(at->dest, t, true, true, "atomic:" + atomic_op_type_name(at->op_type));
     }
 
   // union-find over constructs joined by a shared global-temp offset (cross-construct edge).
@@ -269,7 +274,7 @@ void run_offload_gt_census(IRNode *ir, const std::unordered_map<int, int> &owner
   for (auto &kv : readers)
     all_offsets.insert(kv.first);
   long long cross_task = 0, cross_construct = 0, prologue_sourced = 0;
-  std::vector<int> fanout;  // #distinct constructs touching each cross-construct offset (hub vs chain)
+  std::vector<std::pair<int, std::size_t>> fanout;  // (#distinct constructs, offset) for each cross-construct slot
   for (auto off : all_offsets) {
     std::set<int> ts(writers[off].begin(), writers[off].end());
     ts.insert(readers[off].begin(), readers[off].end());
@@ -287,7 +292,7 @@ void run_offload_gt_census(IRNode *ir, const std::unordered_map<int, int> &owner
       prologue_sourced++;
     if (cs.size() > 1) {
       cross_construct++;
-      fanout.push_back((int)cs.size());
+      fanout.emplace_back((int)cs.size(), off);
       int base = *cs.begin();
       for (int c : cs)
         uf[find(base)] = find(c);
@@ -295,12 +300,22 @@ void run_offload_gt_census(IRNode *ir, const std::unordered_map<int, int> &owner
   }
   std::sort(fanout.begin(), fanout.end(), std::greater<>());
   int fanout_gt2 = 0;
-  for (int f : fanout)
-    if (f > 2)
+  for (auto &f : fanout)
+    if (f.first > 2)
       fanout_gt2++;
   std::string ftop;
   for (size_t i = 0; i < std::min((size_t)6, fanout.size()); i++)
-    ftop += std::to_string(fanout[i]) + " ";
+    ftop += std::to_string(fanout[i].first) + " ";
+  // Concrete identity of the top hub slots: offset, data type, access kinds, #writer/#reader tasks.
+  for (size_t i = 0; i < std::min((size_t)8, fanout.size()); i++) {
+    auto off = fanout[i].second;
+    std::string acc;
+    for (auto &a : off_access[off])
+      acc += a + ",";
+    QD_INFO("[gt-census]   HUB off={} dtype={} fanout_constructs={} writers={} readers={} access={}", off,
+            off_dtype.count(off) ? off_dtype[off] : "?", fanout[i].first, (int)writers[off].size(),
+            (int)readers[off].size(), acc);
+  }
 
   // Per-group stats, weighting by real recompile cost: count loop-constructs and sum their statements per group. The
   // group with the most loops (and the one with the most statements) bounds the worst-case single-edit recompile.
