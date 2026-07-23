@@ -306,15 +306,58 @@ void run_offload_gt_census(IRNode *ir, const std::unordered_map<int, int> &owner
   std::string ftop;
   for (size_t i = 0; i < std::min((size_t)6, fanout.size()); i++)
     ftop += std::to_string(fanout[i].first) + " ";
-  // Concrete identity of the top hub slots: offset, data type, access kinds, #writer/#reader tasks.
+  // Concrete identity of the top hub slots: offset, data type, access kinds, #writer/#reader tasks, and a
+  // classification of the *producer* (the value stored into the slot). S2a' decision input: walk the operand cone of
+  // the writer's stored value. If the cone bottoms out only in ArgLoad/Const/ExternalPtr (+ optional memory
+  // GlobalLoads) and references NO other global-temp slot, the hub is independently recomputable inside each
+  // construct (catch-2 dissolves it, no stable-offset ABI needed). A cone that reads another temp slot is a genuine
+  // cross-construct chain that needs a stable offset.
   for (size_t i = 0; i < std::min((size_t)8, fanout.size()); i++) {
     auto off = fanout[i].second;
     std::string acc;
     for (auto &a : off_access[off])
       acc += a + ",";
-    QD_INFO("[gt-census]   HUB off={} dtype={} fanout_constructs={} writers={} readers={} access={}", off,
-            off_dtype.count(off) ? off_dtype[off] : "?", fanout[i].first, (int)writers[off].size(),
-            (int)readers[off].size(), acc);
+    // find the (single) writer's stored value
+    Stmt *producer = nullptr;
+    for (int t : writers[off])
+      for (auto *s : body[t])
+        if (auto *st = s->cast<GlobalStoreStmt>())
+          if (auto *g = st->dest->cast<GlobalTemporaryStmt>())
+            if (g->offset == off)
+              producer = st->val;
+    int n_arg = 0, n_const = 0, n_extptr = 0, n_gload = 0, n_other_gtmp = 0, n_nodes = 0;
+    if (producer) {
+      std::set<Stmt *> seen;
+      std::vector<Stmt *> stk{producer};
+      while (!stk.empty()) {
+        Stmt *s = stk.back();
+        stk.pop_back();
+        if (s == nullptr || seen.count(s))
+          continue;
+        seen.insert(s);
+        n_nodes++;
+        if (s->is<ArgLoadStmt>())
+          n_arg++;
+        else if (s->is<ConstStmt>())
+          n_const++;
+        else if (s->is<ExternalPtrStmt>())
+          n_extptr++;
+        else if (s->is<GlobalLoadStmt>())
+          n_gload++;
+        else if (auto *g = s->cast<GlobalTemporaryStmt>()) {
+          if (g->offset != off)
+            n_other_gtmp++;
+        }
+        for (auto *o : s->get_operands())
+          stk.push_back(o);
+      }
+    }
+    QD_INFO(
+        "[gt-census]   HUB off={} dtype={} fanout={} writers={} readers={} access={} | producer_cone: nodes={} arg={} "
+        "const={} extptr={} memload={} other_temp={} => {}",
+        off, off_dtype.count(off) ? off_dtype[off] : "?", fanout[i].first, (int)writers[off].size(),
+        (int)readers[off].size(), acc, n_nodes, n_arg, n_const, n_extptr, n_gload, n_other_gtmp,
+        (producer == nullptr ? "NO-STORE" : (n_other_gtmp == 0 ? "RECOMPUTABLE" : "CHAINED")));
   }
 
   // Per-group stats, weighting by real recompile cost: count loop-constructs and sum their statements per group. The
