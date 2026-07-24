@@ -59,3 +59,39 @@ def test_atomic_dest_not_cached(use_ndarray: bool) -> None:
     k(x, result)
     for i in range(n):
         assert result[i] == m, f"result[{i}] = {result[i]}, expected {m}"
+
+
+@pytest.mark.parametrize("use_ndarray", [False, True])
+@test_utils.test()
+def test_literal_index_load_not_cached_over_aliasing_store(use_ndarray: bool) -> None:
+    """Regression for issue #810: a literal-index load (a[0]) that may alias a
+    loop-variable-index store (a[i]) must not be served from a cached local slot
+    while the store's write-back is deferred past the loop.  Otherwise the load
+    returns a stale pre-write-back value when the two indices coincide (i == 0).
+
+    Requires all four ingredients: a serialized outer loop, an inner loop, a
+    store through the outer loop variable index, and a literal-index read of the
+    same buffer guarded by a comparison of the loop variable to that literal.
+    """
+    n = 2
+
+    TensorType = qd.ndarray if use_ndarray else qd.field
+
+    AnnotationType = qd.types.ndarray() if use_ndarray else qd.template()
+
+    @qd.kernel
+    def k(a: AnnotationType, out: AnnotationType):
+        qd.loop_config(serialize=True)
+        for i_c in range(n):
+            for i_iter in range(1):
+                a[i_c] = 1
+                if i_c == 0:
+                    out[0] = a[0]
+                    out[1] = a[i_c]
+
+    a = TensorType(dtype=qd.i32, shape=(n,))
+    out = TensorType(dtype=qd.i32, shape=(n,))
+
+    k(a, out)
+    assert out[0] == 1, f"stale literal-index read: out[0] = {out[0]}, expected 1"
+    assert out[1] == 1, f"out[1] = {out[1]}, expected 1"

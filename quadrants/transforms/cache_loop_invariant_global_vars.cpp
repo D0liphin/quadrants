@@ -34,6 +34,88 @@ void gather_atomic_dests(IRNode *root,
   }
 }
 
+// Return the buffer that |ptr| addresses: a field by SNode (out_snode) or an
+// ndarray by arg_id (out_arr_id). Returns true if |ptr| resolves to either.
+bool resolve_access_buffer(Stmt *ptr, const SNode *&out_snode, std::vector<int> &out_arr_id) {
+  Stmt *origin = ptr;
+  if (auto *mptr = origin->cast<MatrixPtrStmt>()) {
+    origin = mptr->origin;
+  }
+  if (auto *gptr = origin->cast<GlobalPtrStmt>()) {
+    out_snode = gptr->snode;
+    return true;
+  }
+  if (auto *eptr = origin->cast<ExternalPtrStmt>()) {
+    if (auto *arg = eptr->base_ptr->cast<ArgLoadStmt>()) {
+      out_arr_id = arg->arg_id;
+      return true;
+    }
+  }
+  return false;
+}
+
+// Collect buffers accessed via a may-aliasing pair of distinct pointers, i.e.
+// two access pointers P1, P2 with alias_analysis(P1, P2) == uncertain. Such a
+// buffer must not be cached by this pass: the pass may cache one access into a
+// local slot and defer its write-back until after the loop, while an aliasing
+// access reads or writes global memory directly. When the two addresses coincide
+// at runtime the direct access observes a stale value (see issue #810). Buffers
+// whose accesses are all definitely-same or all definitely-different are safe and
+// are left cacheable, so read-modify-write accumulators and disjoint accesses are
+// unaffected. Field buffers are recorded by SNode; ndarray buffers by arg_id.
+void gather_may_alias_unsafe_buffers(IRNode *root,
+                                     std::unordered_set<const SNode *> &field_snodes,
+                                     std::unordered_set<std::vector<int>, hashing::Hasher<std::vector<int>>> &arr_ids) {
+  auto accesses = irpass::analysis::gather_statements(root, [](Stmt *s) {
+    return s->is<GlobalLoadStmt>() || s->is<GlobalStoreStmt>() || s->is<AtomicOpStmt>();
+  });
+  std::unordered_map<const SNode *, std::vector<Stmt *>> field_ptrs;
+  std::unordered_map<std::vector<int>, std::vector<Stmt *>, hashing::Hasher<std::vector<int>>> arr_ptrs;
+  for (auto *s : accesses) {
+    Stmt *ptr = nullptr;
+    if (auto *load = s->cast<GlobalLoadStmt>()) {
+      ptr = load->src;
+    } else if (auto *store = s->cast<GlobalStoreStmt>()) {
+      ptr = store->dest;
+    } else if (auto *atomic = s->cast<AtomicOpStmt>()) {
+      ptr = atomic->dest;
+    }
+    if (ptr == nullptr) {
+      continue;
+    }
+    const SNode *snode = nullptr;
+    std::vector<int> arr_id;
+    if (!resolve_access_buffer(ptr, snode, arr_id)) {
+      continue;
+    }
+    if (snode != nullptr) {
+      field_ptrs[snode].push_back(ptr);
+    } else {
+      arr_ptrs[arr_id].push_back(ptr);
+    }
+  }
+  auto has_may_alias_pair = [](const std::vector<Stmt *> &ptrs) {
+    for (int i = 0; i < (int)ptrs.size(); i++) {
+      for (int j = i + 1; j < (int)ptrs.size(); j++) {
+        if (irpass::analysis::alias_analysis(ptrs[i], ptrs[j]) == AliasResult::uncertain) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  for (auto &[snode, ptrs] : field_ptrs) {
+    if (has_may_alias_pair(ptrs)) {
+      field_snodes.insert(snode);
+    }
+  }
+  for (auto &[arr_id, ptrs] : arr_ptrs) {
+    if (has_may_alias_pair(ptrs)) {
+      arr_ids.insert(arr_id);
+    }
+  }
+}
+
 }  // namespace
 
 class CacheLoopInvariantGlobalVars : public LoopInvariantDetector {
@@ -58,6 +140,8 @@ class CacheLoopInvariantGlobalVars : public LoopInvariantDetector {
   std::unordered_set<Stmt *> dynamic_indexed_ptrs_;
   std::unordered_set<const SNode *> atomic_dest_snodes_;
   std::unordered_set<std::vector<int>, hashing::Hasher<std::vector<int>>> atomic_dest_arr_ids_;
+  std::unordered_set<const SNode *> may_alias_unsafe_snodes_;
+  std::unordered_set<std::vector<int>, hashing::Hasher<std::vector<int>>> may_alias_unsafe_arr_ids_;
 
   OffloadedStmt *current_offloaded;
 
@@ -77,6 +161,9 @@ class CacheLoopInvariantGlobalVars : public LoopInvariantDetector {
     atomic_dest_snodes_.clear();
     atomic_dest_arr_ids_.clear();
     gather_atomic_dests(stmt, atomic_dest_snodes_, atomic_dest_arr_ids_);
+    may_alias_unsafe_snodes_.clear();
+    may_alias_unsafe_arr_ids_.clear();
+    gather_may_alias_unsafe_buffers(stmt, may_alias_unsafe_snodes_, may_alias_unsafe_arr_ids_);
 
     // We don't need to visit TLS/BLS prologues/epilogues.
     if (stmt->body) {
@@ -244,6 +331,18 @@ class CacheLoopInvariantGlobalVars : public LoopInvariantDetector {
     return false;
   }
 
+  bool is_may_alias_unsafe(Stmt *stmt) {
+    const SNode *snode = nullptr;
+    std::vector<int> arr_id;
+    if (!resolve_access_buffer(stmt, snode, arr_id)) {
+      return false;
+    }
+    if (snode != nullptr) {
+      return may_alias_unsafe_snodes_.count(snode) > 0;
+    }
+    return may_alias_unsafe_arr_ids_.count(arr_id) > 0;
+  }
+
   std::optional<int> find_cache_depth_if_cacheable(Stmt *operand, Block *current_scope) {
     if (is_dynamically_indexed(operand)) {
       return std::nullopt;
@@ -252,6 +351,9 @@ class CacheLoopInvariantGlobalVars : public LoopInvariantDetector {
       return std::nullopt;
     }
     if (is_atomic_dest(operand)) {
+      return std::nullopt;
+    }
+    if (is_may_alias_unsafe(operand)) {
       return std::nullopt;
     }
     std::optional<int> depth;
