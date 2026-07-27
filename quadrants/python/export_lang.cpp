@@ -415,6 +415,8 @@ void export_lang(nb::module_ &m) {
           nb::arg("dt"), nb::arg("shape"), nb::arg("layout") = ExternalArrayLayout::kNull, nb::arg("zero_fill") = false,
           nb::arg("dbg_info") = DebugInfo(), nb::rv_policy::reference)
       .def("delete_ndarray", &Program::delete_ndarray)
+      .def("delete_all_ndarrays", &Program::delete_all_ndarrays)
+      .def("destroy_all_snode_trees", &Program::destroy_all_snode_trees)
       .def("get_ndarray_data_ptr_as_int",
            [](Program *program, Ndarray *ndarray) { return program->get_ndarray_data_ptr_as_int(ndarray); })
       .def("fill_float", [](Program *program, Ndarray *ndarray,

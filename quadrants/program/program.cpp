@@ -21,6 +21,7 @@
 #include "quadrants/math/arithmetic.h"
 #include "quadrants/rhi/arch.h"
 #include "quadrants/rhi/common/host_memory_pool.h"
+#include "quadrants/inc/constants.h"
 
 #ifdef QD_WITH_LLVM
 #include "quadrants/runtime/program_impls/llvm/llvm_program.h"
@@ -216,7 +217,15 @@ static void remove_rw_accessor_cache(SNode *parent_snode, SNodeRwAccessorsBank *
 }
 
 void Program::destroy_snode_tree(SNodeTree *snode_tree) {
-  QD_ASSERT(arch_uses_llvm(compile_config().arch) || compile_config().arch == Arch::vulkan);
+  // Vulkan and Metal share the same gfx SNodeTreeManager destroy path, so both SPIR-V backends are
+  // supported alongside the LLVM ones.
+  QD_ASSERT(arch_uses_llvm(compile_config().arch) || arch_uses_spirv(compile_config().arch));
+
+  // Idempotent: a tree already freed (e.g. by `destroy_all_snode_trees`) is a no-op, so a stray
+  // second destruction cannot double-free the device buffer or push a duplicate id.
+  if (!live_snode_tree_ids_.erase(snode_tree->id())) {
+    return;
+  }
 
   // When accessing a qd.field at Python scope, SNodeRwAccessorsBank creates a Quadrants Kernel to read/write the field
   // in a JIT manner, which caches the compiled JIT Kernel so as to avoid recompilation when accessing the same field.
@@ -235,14 +244,38 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
   snode_id_cache_.clear();
 }
 
+void Program::destroy_all_snode_trees() {
+  // Snapshot the live ids first: `destroy_snode_tree` mutates `live_snode_tree_ids_` as it goes.
+  std::vector<int> ids(live_snode_tree_ids_.begin(), live_snode_tree_ids_.end());
+  for (int id : ids) {
+    destroy_snode_tree(snode_trees_[id].get());
+  }
+}
+
 SNodeTree *Program::add_snode_tree(std::unique_ptr<SNode> root, bool compile_only) {
   const int id = allocate_snode_tree_id();
+  // The LLVM runtime stores per-tree state (`roots`, `root_mem_sizes`) in fixed-size arrays of
+  // `kMaxNumSnodeTreesLlvm` entries, indexed by tree id, and `runtime_initialize_snodes` writes them
+  // without bounds checking. A tree id at or above the limit would write past those arrays and corrupt
+  // adjacent runtime fields (e.g. `thread_pool`), so reject it here with a clear error instead. Ids are
+  // recycled when trees are destroyed, so this is only reached when more than `kMaxNumSnodeTreesLlvm`
+  // trees are simultaneously live (for example accumulating fields across a long-lived runtime that is
+  // never reset). Free trees you no longer need (`SNodeTree.destroy()` / `qd.free_all_memory()`) to
+  // recycle ids.
+  if (arch_uses_llvm(compile_config().arch) && id >= kMaxNumSnodeTreesLlvm) {
+    QD_ERROR(
+        fmt::format("The number of simultaneously live SNode trees exceeded the maximum supported by the LLVM "
+                    "backend ({}). Destroy SNode trees you no longer need to stay under this limit.",
+                    kMaxNumSnodeTreesLlvm));
+  }
   auto tree = std::make_unique<SNodeTree>(id, std::move(root));
   tree->root()->set_snode_tree_id(id);
   if (compile_only) {
     program_impl_->compile_snode_tree_types(tree.get());
   } else {
     program_impl_->materialize_snode_tree(tree.get(), result_buffer);
+    // Only materialized trees own a device buffer that destruction has to free.
+    live_snode_tree_ids_.insert(id);
   }
   if (id < snode_trees_.size()) {
     snode_trees_[id] = std::move(tree);
@@ -479,6 +512,17 @@ void Program::delete_ndarray(Ndarray *ndarray) {
   // kernels using it are executed.
   if (ndarrays_.count(ndarray) && !program_impl_->used_in_kernel(ndarray->ndarray_alloc_.alloc_id)) {
     ndarrays_.erase(ndarray);
+  }
+}
+
+void Program::delete_all_ndarrays() {
+  for (auto it = ndarrays_.begin(); it != ndarrays_.end();) {
+    // Mirror `delete_ndarray`: never free a buffer an in-flight kernel still reads.
+    if (!program_impl_->used_in_kernel(it->second->ndarray_alloc_.alloc_id)) {
+      it = ndarrays_.erase(it);
+    } else {
+      ++it;
+    }
   }
 }
 

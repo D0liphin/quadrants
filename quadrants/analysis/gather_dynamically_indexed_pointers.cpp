@@ -21,6 +21,24 @@ bool is_leaf_nodes_on_same_branch(SNode *snode0, SNode *snode1) {
   return true;
 }
 
+static bool indices_have_const(const std::vector<Stmt *> &indices) {
+  for (auto *index_stmt : indices) {
+    if (index_stmt->is<ConstStmt>()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool indices_have_loop_index(const std::vector<Stmt *> &indices) {
+  for (auto *index_stmt : indices) {
+    if (index_stmt->is<LoopIndexStmt>()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 class DynamicIndexingAnalyzer : public BasicStmtVisitor {
   void record_dynamic_indexed_ptr(ExternalPtrStmt *extern_ptr) {
     dynamically_indexed_ptrs_.insert(extern_ptr);
@@ -43,6 +61,46 @@ class DynamicIndexingAnalyzer : public BasicStmtVisitor {
     }
   }
 
+  // A literal (const) index and a loop-variable index into the same memory can refer to the same element (the loop
+  // variable may equal the constant), so caching either one to an independent local slot would drop the aliasing
+  // store/load. The parallel-loop uniqueness analysis rejects such a pair on its own, but a serialized loop bypasses
+  // that check, so both accesses are flagged here to keep them out of the loop-invariant caching pass.
+  void record_const_loop_alias(ExternalPtrStmt *extern_ptr) {
+    bool has_const = indices_have_const(extern_ptr->indices);
+    bool has_loop_index = indices_have_loop_index(extern_ptr->indices);
+    if (!has_const && !has_loop_index) {
+      return;
+    }
+    for (auto *other_extern_ptr : extern_ptrs_) {
+      if (other_extern_ptr == extern_ptr || other_extern_ptr->base_ptr != extern_ptr->base_ptr) {
+        continue;
+      }
+      if ((has_const && indices_have_loop_index(other_extern_ptr->indices)) ||
+          (has_loop_index && indices_have_const(other_extern_ptr->indices))) {
+        record_dynamic_indexed_ptr(extern_ptr);
+        return;
+      }
+    }
+  }
+
+  void record_const_loop_alias(GlobalPtrStmt *global_ptr) {
+    bool has_const = indices_have_const(global_ptr->indices);
+    bool has_loop_index = indices_have_loop_index(global_ptr->indices);
+    if (!has_const && !has_loop_index) {
+      return;
+    }
+    for (auto *other_global_ptr : global_ptrs_) {
+      if (other_global_ptr == global_ptr || !is_leaf_nodes_on_same_branch(other_global_ptr->snode, global_ptr->snode)) {
+        continue;
+      }
+      if ((has_const && indices_have_loop_index(other_global_ptr->indices)) ||
+          (has_loop_index && indices_have_const(other_global_ptr->indices))) {
+        record_dynamic_indexed_ptr(global_ptr);
+        return;
+      }
+    }
+  }
+
  public:
   explicit DynamicIndexingAnalyzer(IRNode *node) {
   }
@@ -53,6 +111,7 @@ class DynamicIndexingAnalyzer : public BasicStmtVisitor {
         record_dynamic_indexed_ptr(stmt);
       }
     }
+    record_const_loop_alias(stmt);
 
     global_ptrs_.insert(stmt);
   }
@@ -63,6 +122,7 @@ class DynamicIndexingAnalyzer : public BasicStmtVisitor {
         record_dynamic_indexed_ptr(stmt);
       }
     }
+    record_const_loop_alias(stmt);
 
     extern_ptrs_.insert(stmt);
   }

@@ -9,6 +9,7 @@
 #include <stack>
 #include <shared_mutex>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #define QD_RUNTIME_HOST
@@ -255,6 +256,13 @@ class QD_DLL_EXPORT Program {
   void destroy_snode_tree(SNodeTree *snode_tree);
 
   /**
+   * Destroys every live SNode tree, freeing all field device buffers without a full
+   * reset. Compiled kernels are left untouched (callers must not launch kernels that
+   * reference the freed fields), and ndarrays are unaffected. Idempotent.
+   */
+  void destroy_all_snode_trees();
+
+  /**
    * Adds a new SNode tree.
    *
    * @param root The root of the new SNode tree.
@@ -327,6 +335,13 @@ class QD_DLL_EXPORT Program {
 
   void delete_ndarray(Ndarray *ndarray);
 
+  /**
+   * Frees every ndarray tracked by this program (primal and gradient buffers alike). Ndarrays that
+   * a pending kernel still references are skipped, so callers should synchronize first to guarantee
+   * a full release.
+   */
+  void delete_all_ndarrays();
+
   intptr_t get_ndarray_data_ptr_as_int(const Ndarray *ndarray);
 
   void fill_ndarray_fast_u32(Ndarray *ndarray, uint32_t val);
@@ -392,6 +407,10 @@ class QD_DLL_EXPORT Program {
   // `program/adstack_size_expr_eval.{h,cpp}`; routed through `adstack_cache()` getter.
   std::unique_ptr<AdStackCache> adstack_cache_;
   std::stack<int> free_snode_tree_ids_;
+  // Ids of SNode trees that are currently live (materialized, buffer not yet freed). Used to make
+  // tree destruction idempotent so `destroy_all_snode_trees` and a stray `destroy_snode_tree` on the
+  // same tree cannot double-free.
+  std::unordered_set<int> live_snode_tree_ids_;
 
   std::vector<std::unique_ptr<Function>> functions_;
   std::unordered_map<FunctionKey, Function *> function_map_;

@@ -206,6 +206,40 @@ def reset():
     impl.reset()
 
 
+def free_all_memory():
+    """Frees the device memory of every allocated field and ndarray without resetting Quadrants.
+
+    Unlike :func:`reset`, this keeps the runtime, its compiled kernels, and the compile config
+    intact; it only reclaims the device buffers backing the fields and ndarrays. It covers fields
+    placed under the implicit ``qd.root`` as well as those built through an explicit
+    :class:`quadrants.FieldsBuilder`, plus every ndarray (and its gradient buffer).
+
+    Every field created before the call becomes dangling afterward: reading, writing, or launching
+    a kernel that touches it is undefined. Every ndarray is invalidated: its storage is released and
+    its handle no longer refers to a live buffer. Do not use any field or ndarray created before the
+    call; allocate fresh ones instead. Kernels that operate only on freshly allocated data keep
+    running without recompilation.
+
+    Example::
+
+        >>> x = qd.field(qd.f32, shape=(1024,))
+        >>> arr = qd.ndarray(qd.f32, shape=(1024,))
+        >>> qd.free_all_memory()  # both x and arr are now invalid; the runtime stays alive
+    """
+    runtime = impl.get_runtime()
+    prog = runtime.prog
+    if not impl.is_python_backend():
+        # Flush pending launches so no in-flight kernel still references a buffer we are about to
+        # free (on gfx backends this also clears the ndarray in-use set that guards delete_ndarray).
+        prog.synchronize()
+    prog.destroy_all_snode_trees()
+    prog.delete_all_ndarrays()
+    # Invalidate the Python-side ndarray handles so stale access fails cleanly and __del__ does not
+    # attempt a second free of the buffers just released.
+    for ndarray in list(runtime.ndarrays):
+        ndarray._reset()
+
+
 class _EnvironmentConfigurator:
     def __init__(self, kwargs, _cfg):
         self.cfg = _cfg
@@ -902,6 +936,7 @@ __all__ = [
     "init",
     "mesh_local",
     "no_activate",
+    "free_all_memory",
     "reset",
     "mesh_patch_idx",
     "is_extension_enabled",

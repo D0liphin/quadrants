@@ -67,6 +67,58 @@ TEST(Scalarize, ScalarizeGlobalStore) {
   EXPECT_EQ(block->statements[14]->is<GlobalStoreStmt>(), true);
 }
 
+TEST(Scalarize, ScalarizeGlobalStoreFromScalarCast) {
+  // Regression: a StoreStmt whose value is a cast_value<TensorType> of a SCALAR (a broadcasting cast).
+  // This IR is not producible from the frontend but optimization passes can emit it; scalarize must
+  // handle it instead of asserting on `stmt->val->is<MatrixInitStmt>()` in scalarize_store_stmt.
+  TestProgram test_prog;
+  test_prog.setup();
+
+  auto block = std::make_unique<Block>();
+
+  auto func = []() {};
+  auto kernel = std::make_unique<Kernel>(*test_prog.prog(), func, "fake_kernel");
+
+  auto &type_factory = TypeFactory::get_instance();
+
+  /*
+    TensorType<2 x i32>* %dest = ExternalPtrStmt()
+    i32                  %s    = ConstStmt(7)
+    TensorType<2 x i32>  %c    = cast_value<Tensor(2) i32>(%s)   // scalar -> vec2 broadcast
+    StoreStmt(%dest, %c)
+  */
+  Type *tensor_type = type_factory.get_tensor_type({2}, type_factory.get_primitive_type(PrimitiveTypeID::i32));
+
+  auto scalar_const = block->push_back<ConstStmt>(TypedConstant(7));
+
+  auto type = type_factory.get_ndarray_struct_type(tensor_type, 1);
+  auto argload_stmt = block->push_back<ArgLoadStmt>(std::vector<int>{0} /*arg_id*/, type, /*is_ptr*/ true,
+                                                    /*create_load*/ false);
+  std::vector<Stmt *> indices = {};
+  Stmt *dest_stmt = block->push_back<ExternalPtrStmt>(argload_stmt, indices);
+  dest_stmt->ret_type = type_factory.get_pointer_type(tensor_type);
+
+  auto cast_stmt = block->push_back<UnaryOpStmt>(UnaryOpType::cast_value, scalar_const);
+  cast_stmt->cast<UnaryOpStmt>()->cast_type = tensor_type;
+  cast_stmt->ret_type = tensor_type;
+
+  block->push_back<GlobalStoreStmt>(dest_stmt, cast_stmt);
+
+  // Must not assert (previously QD_ASSERT(stmt->val->is<MatrixInitStmt>()) fired here).
+  irpass::scalarize(block.get());
+  irpass::lower_matrix_ptr(block.get());
+  irpass::die(block.get());
+
+  // The vec2 store must have been scalarized into one GlobalStoreStmt per element.
+  int num_stores = 0;
+  for (auto &s : block->statements) {
+    if (s->is<GlobalStoreStmt>()) {
+      num_stores++;
+    }
+  }
+  EXPECT_EQ(num_stores, 2);
+}
+
 TEST(Scalarize, ScalarizeGlobalLoad) {
   TestProgram test_prog;
   test_prog.setup();

@@ -59,3 +59,38 @@ def test_atomic_dest_not_cached(use_ndarray: bool) -> None:
     k(x, result)
     for i in range(n):
         assert result[i] == m, f"result[{i}] = {result[i]}, expected {m}"
+
+
+@pytest.mark.parametrize("use_ndarray", [False, True])
+@test_utils.test()
+def test_literal_index_load_sees_loop_var_store(use_ndarray: bool) -> None:
+    """A literal-index load must observe an aliasing store made through the loop-variable index.
+
+    Internal details:
+        The serialized outer loop turns the offload into a serial task, so the cache pass trusts
+        every pointer as uniquely accessed and buffers the store to a[i_c] into a local across the
+        inner loop.  The literal-index read a[0] aliases a[i_c] when i_c == 0, so hoisting the store
+        out of the loop leaves the read observing the stale pre-loop memory value.
+    """
+    n = 2
+
+    TensorType = qd.ndarray if use_ndarray else qd.field
+
+    AnnotationType = qd.types.ndarray() if use_ndarray else qd.template()
+
+    @qd.kernel
+    def k(a: AnnotationType, out: AnnotationType):
+        qd.loop_config(serialize=True)
+        for i_c in range(n):
+            for i_iter in range(1):
+                a[i_c] = 1
+                if i_c == 0:
+                    out[0] = a[0]
+                    out[1] = a[i_c]
+
+    a = TensorType(dtype=qd.i32, shape=(n,))
+    out = TensorType(dtype=qd.i32, shape=(n,))
+
+    k(a, out)
+    assert out[0] == 1, f"literal-index load returned {out[0]}, expected 1"
+    assert out[1] == 1, f"loop-var-index load returned {out[1]}, expected 1"

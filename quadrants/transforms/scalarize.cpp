@@ -211,6 +211,35 @@ class Scalarize : public BasicStmtVisitor {
       delayed_modifier_.insert_before(stmt, std::move(matrix_init_stmt));
 
       delayed_modifier_.erase(stmt);
+    } else if (stmt_dtype->is<TensorType>()) {
+      // Scalar operand, tensor result: a broadcasting unary op (result[i] = op(operand)). This is not
+      // producible from the frontend, but optimization passes can emit it - e.g. a
+      // cast_value<TensorType> of a scalar. Scalarize it into a MatrixInitStmt so downstream consumers
+      // (stores, binary/unary ops) see a MatrixInitStmt, as they assume. Without this the cast stays a
+      // UnaryOpStmt and scalarize_store_stmt asserts on `stmt->val->is<MatrixInitStmt>()`.
+      auto tensor_type = stmt_dtype->as<TensorType>();
+      int num_elements = tensor_type->get_num_elements();
+      auto primitive_type = stmt_dtype.get_element_type();
+
+      std::vector<Stmt *> matrix_init_values;
+      for (int i = 0; i < num_elements; i++) {
+        auto unary_stmt = std::make_unique<UnaryOpStmt>(stmt->op_type, stmt->operand);
+        if (stmt->is_cast()) {
+          unary_stmt->cast_type = stmt->cast_type.get_element_type();
+        }
+        unary_stmt->ret_type = primitive_type;
+        matrix_init_values.push_back(unary_stmt.get());
+
+        delayed_modifier_.insert_before(stmt, std::move(unary_stmt));
+      }
+
+      auto matrix_init_stmt = std::make_unique<MatrixInitStmt>(matrix_init_values);
+      matrix_init_stmt->ret_type = stmt_dtype;
+
+      immediate_modifier_.replace_usages_with(stmt, matrix_init_stmt.get());
+      delayed_modifier_.insert_before(stmt, std::move(matrix_init_stmt));
+
+      delayed_modifier_.erase(stmt);
     }
   }
 

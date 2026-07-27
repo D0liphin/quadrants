@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 import quadrants as qd
+from quadrants.lang import impl
 from quadrants.lang.exception import QuadrantsRuntimeError
 
 from tests import test_utils
@@ -182,11 +183,97 @@ def test_fields_builder_destroy(test_1d_size, field_type):
             c.destroy()
 
 
-@test_utils.test(arch=[qd.cpu, qd.cuda, qd.amdgpu, qd.vulkan])
+@test_utils.test(arch=[qd.cpu, qd.cuda, qd.amdgpu])
+def test_snode_tree_count_limit_raises_not_corrupts():
+    # The LLVM runtime keeps per-tree state (roots, root_mem_sizes) in fixed arrays of
+    # kMaxNumSnodeTreesLlvm (512) entries indexed by tree id, written without bounds checking. A
+    # 513th simultaneously-live tree used to overflow those arrays onto the adjacent thread_pool
+    # pointer, so the next parallel kernel dereferenced garbage and crashed. Adding the tree past the
+    # limit must now raise a clean error instead. Restricted to the LLVM backends: the gfx (Metal /
+    # Vulkan) backends store roots in a growable vector and have no such limit.
+    trees = []
+    try:
+        with pytest.raises(RuntimeError, match="maximum supported by the LLVM backend"):
+            for _ in range(513):
+                fb = qd.FieldsBuilder()
+                x = qd.field(qd.f32)
+                fb.dense(qd.i, 1).place(x)
+                trees.append(fb.finalize())
+    finally:
+        for tree in trees:
+            tree.destroy()
+
+
+@test_utils.test(arch=[qd.cpu, qd.cuda, qd.amdgpu], require=qd.extension.sparse)
+def test_snode_id_count_limit_raises_not_corrupts():
+    # The LLVM runtime keeps per-snode state (element_lists, node_allocators, ambient_elements) in
+    # fixed arrays of quadrants_max_num_snodes (2048) entries indexed by SNode id, written without
+    # bounds checking. SNode ids come from a process-global monotonic counter that is reset only by a
+    # full reset (qd.init), never by destroying trees, so reusing a runtime long enough overflows those
+    # arrays and corrupts adjacent runtime state. Crossing the limit must raise a clean error instead.
+    # Uses sparse (pointer) trees, which are the ones that perform the snode-id-indexed writes; trees
+    # are destroyed each iteration (destroying does not rewind the snode counter).
+    with pytest.raises(RuntimeError, match="maximum supported by the LLVM backend"):
+        for _ in range(60):  # ~60 * 53 snodes per tree crosses 2048
+            fb = qd.FieldsBuilder()
+            fields = [qd.field(qd.f32) for _ in range(50)]
+            block = fb.pointer(qd.i, 4).dense(qd.i, 4)
+            for f in fields:
+                block.place(f)
+            tree = fb.finalize()
+            tree.destroy()
+
+
+@test_utils.test()
+def test_free_all_memory():
+    # free_all_memory() reclaims every field buffer (implicit-root fields and explicit
+    # FieldsBuilder trees alike) and every ndarray buffer without a full qd.reset(): the
+    # compiled kernels and compile config stay intact. Every field and ndarray created
+    # before the call is invalid afterward.
+    x = qd.field(qd.f32, shape=(64,))
+    x.fill(1.0)
+
+    fb = qd.FieldsBuilder()
+    y = qd.field(qd.i32)
+    fb.dense(qd.i, 32).place(y)
+    fb.finalize()
+
+    arr = qd.ndarray(qd.f32, shape=(8,))
+    arr.fill(3.0)
+
+    @qd.kernel
+    def scale(a: qd.types.ndarray(dtype=qd.f32, ndim=1)):
+        for i in a:
+            a[i] = a[i] * 2.0
+
+    scale(arr)
+    num_compiled = impl.get_runtime().get_num_compiled_functions()
+    assert num_compiled > 0
+
+    qd.free_all_memory()
+
+    # Compiled kernels are NOT cleared (unlike qd.reset()).
+    assert impl.get_runtime().get_num_compiled_functions() == num_compiled
+    # The ndarray handle is invalidated (its buffer was released).
+    assert arr.arr is None
+
+    # Runtime is still usable for freshly allocated fields and ndarrays, and the kernel
+    # compiled before the call is reused as-is (no recompilation).
+    z = qd.field(qd.f32, shape=(16,))
+    z.fill(5.0)
+    assert np.allclose(z.to_numpy(), 5.0)
+
+    arr2 = qd.ndarray(qd.f32, shape=(8,))
+    arr2.fill(3.0)
+    scale(arr2)
+    assert np.allclose(arr2.to_numpy(), 6.0)
+
+    # Idempotent: a second call with no new allocations is a no-op.
+    qd.free_all_memory()
+
+
+@test_utils.test()
 def test_field_initialize_zero():
-    # Metal is intentionally excluded: `program.cpp:destroy_snode_tree` asserts
-    # `arch_uses_llvm(arch) || arch == vulkan`, so `c.destroy()` below would fail
-    # on metal by design (not a bug).
     fb0 = qd.FieldsBuilder()
     a = qd.field(qd.i32)
     fb0.dense(qd.i, 1).place(a)

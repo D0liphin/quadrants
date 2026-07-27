@@ -14,9 +14,13 @@ Ptr SNodeTreeBufferManager::allocate(std::size_t size, const int snode_tree_id, 
 }
 
 void SNodeTreeBufferManager::destroy(SNodeTree *snode_tree) {
-  auto devalloc = snode_tree_id_to_device_alloc_[snode_tree->id()];
-  runtime_exec_->deallocate_memory_on_device(devalloc);
-  snode_tree_id_to_device_alloc_.erase(snode_tree->id());
+  auto it = snode_tree_id_to_device_alloc_.find(snode_tree->id());
+  if (it == snode_tree_id_to_device_alloc_.end()) {
+    // Already freed; nothing to deallocate.
+    return;
+  }
+  runtime_exec_->deallocate_memory_on_device(it->second);
+  snode_tree_id_to_device_alloc_.erase(it);
 }
 
 }  // namespace quadrants::lang

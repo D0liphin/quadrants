@@ -1,11 +1,14 @@
 #include "quadrants/runtime/llvm/llvm_runtime_executor.h"
 #include "quadrants/program/adstack_size_expr_eval.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <vector>
+
+#include "quadrants/inc/constants.h"
 
 #include "quadrants/ir/stmt_op_types.h"
 
@@ -366,6 +369,27 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(const LlvmOfflineCache:
       all_dense = false;
       break;
     }
+  }
+
+  // The LLVM runtime indexes `element_lists`, `node_allocators` and `ambient_elements` by SNode id in
+  // fixed-size arrays of `quadrants_max_num_snodes` entries, and `runtime_initialize_snodes` (and the
+  // per-snode allocator init below) write them without bounds checking. `SNode::id` is a process-global
+  // monotonic counter that is only reset when a Program is constructed (`qd.init` / full reset), never
+  // when SNode trees are destroyed. Reusing a long-lived runtime across many workloads without a reset
+  // lets the id climb past the limit, at which point those writes run past the arrays and corrupt
+  // adjacent runtime state (heap corruption whose symptom depends on layout). Reject it here with a
+  // clear error instead. Note that destroying trees does not help - only a reset rewinds the counter.
+  // `all_dense` trees skip every snode-id-indexed write, so they are unaffected and not checked.
+  if (!all_dense) {
+    int max_snode_id = root_id + (int)snode_metas.size() - 1;
+    for (const auto &meta : snode_metas) {
+      max_snode_id = std::max(max_snode_id, meta.id);
+    }
+    QD_ERROR_IF(max_snode_id >= quadrants_max_num_snodes,
+                "The total number of SNodes created on this runtime exceeded the maximum supported by the "
+                "LLVM backend ({}). SNode ids are not recycled when trees are destroyed; call qd.reset() "
+                "to reset the runtime before creating more.",
+                quadrants_max_num_snodes);
   }
 
   if ((config_.arch == Arch::cuda || config_.arch == Arch::amdgpu) && use_device_memory_pool() && !all_dense) {
