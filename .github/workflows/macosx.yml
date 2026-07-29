@@ -57,3 +57,10 @@ jobs:
           name: mac_resource_log_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}
           path: ${{ runner.temp }}/resource_sampler.log
           if-no-files-found: warn
+      - name: Upload deep captures (thread/fd/stack dumps on load spike)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac_deep_capture_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}
+          path: ${{ runner.temp }}/deep_capture
+          if-no-files-found: warn
