@@ -8,19 +8,61 @@ set -x
 export QD_FILE_TIMING=1
 export QD_FILE_TIMING_OUTPUT="${RUNNER_TEMP}/file_timing.md"
 
-# --- background resource sampler -------------------------------------------------
-# The slowdown looks like a system-wide stall on certain runner VMs, so sample
-# system memory/swap/load + top-RSS processes every 15s into an artifact. We track
-# system totals (not just parent RSS) because pytest-xdist runs up to 8 workers.
+# --- background resource sampler + load-triggered deep capture -------------------
+# The slow legs show the 1-min load average spiking to ~400 with 0 swap, entirely in
+# the teardown phase. The 15s sampler records the system picture (mem/swap/load +
+# process count + total thread count). When load1 crosses LOAD_THRESH we additionally
+# dump *what* the threads are doing (per-process STAT/wchan, per-worker fd + thread
+# counts, `sample` stacks of the top workers, and a system `spindump`) so we can tell a
+# thread/fd leak from driver-blocked (uninterruptible) threads. All go to artifacts.
 RES_LOG="${RUNNER_TEMP}/resource_sampler.log"
+DEEP_DIR="${RUNNER_TEMP}/deep_capture"
+mkdir -p "${DEEP_DIR}"
+LOAD_THRESH=80      # baseline load is single-digit..~40; the spike is ~400
+DEEP_MAX=10         # cap deep captures (spindump files are large)
+DEEP_MIN_GAP=90     # min seconds between deep captures
 (
+  deep_n=0
+  last_deep=0
   while true; do
-    echo "==== $(date -u +%H:%M:%S)Z ===="
+    now_epoch=$(date +%s)
+    load1=$(sysctl -n vm.loadavg | awk '{print $2}')
+    nthreads=$(ps -M -A 2>/dev/null | wc -l | tr -d ' ')
+    nproc=$(ps -A 2>/dev/null | wc -l | tr -d ' ')
+    echo "==== $(date -u +%H:%M:%S)Z load1=${load1} procs=${nproc} threads=${nthreads} ===="
     sysctl -n vm.swapusage
     vm_stat
     uptime
-    ps -A -o rss,pid,comm | sort -rn | head -n 8
+    ps -A -o rss,pid,stat,comm | sort -rn | head -n 8
     echo
+    if [ "${deep_n}" -lt "${DEEP_MAX}" ] \
+       && awk "BEGIN{exit !(${load1:-0} > ${LOAD_THRESH})}" \
+       && [ $((now_epoch - last_deep)) -ge "${DEEP_MIN_GAP}" ]; then
+      ts=$(date -u +%H%M%S)
+      df="${DEEP_DIR}/deep_${ts}_load${load1}.txt"
+      {
+        echo "=== DEEP CAPTURE ${ts}Z load1=${load1} threads=${nthreads} ==="
+        echo "--- process STAT summary (first char) ---"
+        ps -A -o stat,comm | awk 'NR>1{print substr($1,1,1)}' | sort | uniq -c | sort -rn
+        echo "--- ps: pid ppid stat wchan %cpu rss comm ---"
+        ps -A -o pid,ppid,stat,wchan,%cpu,rss,comm
+        echo "--- per python worker: threads + fds ---"
+        for p in $(pgrep python 2>/dev/null); do
+          echo "pid=$p threads=$(ps -M -p "$p" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ') fds=$(lsof -p "$p" 2>/dev/null | wc -l | tr -d ' ')"
+        done
+        echo "--- ps -M -A (all threads, raw) ---"
+        ps -M -A
+      } > "${df}" 2>&1
+      # per-worker user-space stack samples (no sudo needed for own processes)
+      for p in $(ps -A -o pid,rss,comm | grep -i python | sort -k2 -rn | head -3 | awk '{print $1}'); do
+        sample "$p" 3 -file "${DEEP_DIR}/sample_${ts}_pid${p}.txt" >/dev/null 2>&1 &
+      done
+      # system-wide spindump (best effort; needs passwordless sudo)
+      sudo -n /usr/sbin/spindump -notarget 3 10 -o "${DEEP_DIR}/spindump_${ts}.txt" >/dev/null 2>&1 \
+        || echo "spindump skipped ${ts}" >> "${df}"
+      deep_n=$((deep_n+1))
+      last_deep=${now_epoch}
+    fi
     sleep 15
   done
 ) > "${RES_LOG}" 2>&1 &
@@ -50,11 +92,23 @@ if [ -f "$QD_FILE_TIMING_OUTPUT" ]; then
   cat "$QD_FILE_TIMING_OUTPUT" >> "$GITHUB_STEP_SUMMARY"
 fi
 
-# Surface the tail of the sampler in the job summary for quick triage.
+# Surface the tail of the sampler + deep-capture STAT summaries in the job summary.
 {
   echo ""
   echo "### Resource sampler (tail of resource_sampler.log)"
   echo '```'
   tail -n 60 "${RES_LOG}"
+  echo '```'
+  echo ""
+  echo "### Deep captures (load > ${LOAD_THRESH})"
+  ls -1 "${DEEP_DIR}" 2>/dev/null || echo "(none - load never crossed threshold)"
+  echo ""
+  echo "Process STAT summaries at each spike:"
+  echo '```'
+  for f in "${DEEP_DIR}"/deep_*.txt; do
+    [ -f "$f" ] || continue
+    echo "== $(basename "$f") =="
+    sed -n '/process STAT summary/,/ps: pid/p' "$f" | sed '$d'
+  done
   echo '```'
 } >> "$GITHUB_STEP_SUMMARY"
