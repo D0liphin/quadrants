@@ -20,17 +20,16 @@ jobs:
   # can iterate on the Mac test slowdown quickly.
   test:
     name: Test on Mac
-    # A/B experiment: MODE=control vs MODE=deprio on the same (os, py). The deprio arm
-    # keeps the macOS consumer-daemon swarm alive but drops it to the background CPU/IO
-    # tier (renice +20 + taskpolicy -b) so the daemons yield the 3 cores to the pytest
-    # workers WITHOUT the synchronous-XPC hang that SIGSTOP caused. The fix is confirmed
-    # if per-test teardown drops back to ~1s (from 150-380s) on the deprio legs.
+    # Split the single combined `--arch metal,vulkan,cpu` run into one job per backend so
+    # we can see whether the teardown stall is arch-specific (e.g. Metal GPU-context
+    # teardown) or backend-independent. No daemon mitigation (QD_FIX defaults to none):
+    # this is a pure control split. All on the free standard macos-26 runner.
     strategy:
       fail-fast: false
       matrix:
         MAC_OS_VERSION: [26]
         PYTHON_VERSION: ['3.12']
-        MODE: [control, deprio]
+        ARCH: [metal, vulkan, cpu]
     runs-on: macos-${{ matrix.MAC_OS_VERSION }}
     steps:
       - uses: actions/checkout@v4
@@ -45,20 +44,20 @@ jobs:
           bash .github/workflows/scripts_new/macosx/3_install.sh
       - name: Mac OS X test
         env:
-          QD_FIX: ${{ matrix.MODE }}
+          QD_ARCH: ${{ matrix.ARCH }}
         run: |
           bash .github/workflows/scripts_new/macosx/4_test.sh
       - name: Upload resource sampler log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mac_resource_log_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}_${{ matrix.MODE }}
+          name: mac_resource_log_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}_${{ matrix.ARCH }}
           path: ${{ runner.temp }}/resource_sampler.log
           if-no-files-found: warn
       - name: Upload deep captures (thread/fd/stack dumps on load spike)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mac_deep_capture_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}_${{ matrix.MODE }}
+          name: mac_deep_capture_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}_${{ matrix.ARCH }}
           path: ${{ runner.temp }}/deep_capture
           if-no-files-found: warn
