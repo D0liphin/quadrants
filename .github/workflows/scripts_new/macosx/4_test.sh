@@ -15,10 +15,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   disable - launchctl disable + bootout the consumer daemons (fail-fast: callers get
 #             "service unavailable" instead of hanging).
 QD_FIX="${QD_FIX:-none}"
-# QD_ARCH selects which backend(s) this leg tests. Split per-backend (metal / vulkan /
-# cpu) in the matrix so we can see whether the teardown stall is arch-specific (e.g.
+# SPLIT_ARCH selects which backend(s) this leg tests. Split per-backend (metal / vulkan
+# / cpu) in the matrix so we can see whether the teardown stall is arch-specific (e.g.
 # Metal GPU-context teardown) or backend-independent. Defaults to all three.
-QD_ARCH="${QD_ARCH:-metal,vulkan,cpu}"
+# NB: deliberately NOT named QD_ARCH - that is a reserved quadrants env var that makes
+# qd.init() override its arch via arch_from_name(), which aborts on the alias "cpu".
+SPLIT_ARCH="${SPLIT_ARCH:-metal,vulkan,cpu}"
 # Sentinel: the sampler's periodic re-apply must NOT touch any daemon until this file
 # exists, which happens only after all pip installs (network daemons must stay usable
 # for downloads). Without the gate we would throttle/remove networking mid `pip
@@ -128,10 +130,10 @@ fi
 # Phase 1: run all tests except torch-dependent ones.
 # `/usr/bin/time -l` reports the parent-process peak RSS on its stderr (into the job
 # log); the sampler above captures the system-wide picture across all workers.
-/usr/bin/time -l python tests/run_tests.py -v -r 1 --arch "${QD_ARCH}" -m "not needs_torch"
+/usr/bin/time -l python tests/run_tests.py -v -r 1 --arch "${SPLIT_ARCH}" -m "not needs_torch"
 
 # Phase 2: torch was installed above; run only torch tests.
-/usr/bin/time -l python tests/run_tests.py -v -r 1 --arch "${QD_ARCH}" -m needs_torch
+/usr/bin/time -l python tests/run_tests.py -v -r 1 --arch "${SPLIT_ARCH}" -m needs_torch
 
 if [ -f "$QD_FILE_TIMING_OUTPUT" ]; then
   cat "$QD_FILE_TIMING_OUTPUT" >> "$GITHUB_STEP_SUMMARY"

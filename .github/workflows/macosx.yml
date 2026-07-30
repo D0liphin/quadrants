@@ -44,7 +44,9 @@ jobs:
           bash .github/workflows/scripts_new/macosx/3_install.sh
       - name: Mac OS X test
         env:
-          QD_ARCH: ${{ matrix.ARCH }}
+          # NB: must NOT be QD_ARCH - that is a reserved quadrants env var that overrides
+          # qd.init()'s arch via arch_from_name() (which aborts on the alias "cpu").
+          SPLIT_ARCH: ${{ matrix.ARCH }}
         run: |
           bash .github/workflows/scripts_new/macosx/4_test.sh
       - name: Upload resource sampler log

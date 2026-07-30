@@ -7,13 +7,6 @@ import pytest
 
 import quadrants as qd
 
-# The `pyright/` directory holds static-type-check fixtures ("just has to exist" so
-# pyright can be run over them); they are not meant to run under pytest. They call
-# `qd.init(arch=qd.cpu)` at module scope, which pytest executes at *collection* time -
-# and on a cpu-only run that init aborts (Fatal Python error: Aborted), taking down the
-# xdist worker mid-collection. Skip collecting them; pyright still type-checks the files.
-collect_ignore_glob = ["pyright/*"]
-
 
 @pytest.fixture(scope="session", autouse=True)
 def _offline_cache_dir(tmp_path_factory):
