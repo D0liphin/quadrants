@@ -14,9 +14,11 @@
 # system daemons (launchd, WindowServer, configd, mDNSResponder, trustd, securityd,
 # opendirectoryd, the Actions runner, ssh, python) are never touched.
 #
-# Usage: quiesce_daemons.sh [full|restop]
+# Usage: quiesce_daemons.sh [full|restop|resume]
 #   full   - disable Spotlight + SIGSTOP the allowlist (call once, after pip installs)
 #   restop - just (re-)SIGSTOP the allowlist (cheap; call periodically to catch respawns)
+#   resume - SIGCONT the allowlist (call at end of the test step so uploads / post-job
+#            cleanup run on a normal system; a SIGSTOP'd process stays stopped otherwise)
 set -u
 ACTION="${1:-full}"
 
@@ -39,6 +41,18 @@ CONSUMER_DAEMONS=(
   photoanalysisd mediaanalysisd analyticsd rapportd
   studentd familycircled screentimed newsd
 )
+
+if [ "${ACTION}" = "resume" ]; then
+  resumed=0
+  for d in "${CONSUMER_DAEMONS[@]}"; do
+    if pgrep -x "$d" >/dev/null 2>&1; then
+      sudo -n killall -CONT "$d" 2>/dev/null && resumed=$((resumed+1))
+    fi
+  done
+  sudo -n mdutil -a -i on >/dev/null 2>&1 || true
+  echo "quiesce(resume): SIGCONT'd ${resumed} consumer daemons at $(date -u +%H:%M:%SZ)"
+  exit 0
+fi
 
 if [ "${ACTION}" = "full" ]; then
   sudo -n mdutil -a -i off >/dev/null 2>&1 || true

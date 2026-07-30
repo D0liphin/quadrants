@@ -83,7 +83,16 @@ DEEP_MIN_GAP=90     # min seconds between deep captures
   done
 ) > "${RES_LOG}" 2>&1 &
 SAMPLER_PID=$!
-trap 'kill "${SAMPLER_PID}" 2>/dev/null || true' EXIT
+# On exit: stop the sampler FIRST (so it cannot re-SIGSTOP after we resume), then, on the
+# quiesce arm, SIGCONT the daemons so the upload-artifact steps and post-job cleanup run
+# on a normal system.
+cleanup() {
+  kill "${SAMPLER_PID}" 2>/dev/null || true
+  if [ "${QD_QUIESCE}" = "1" ]; then
+    bash "${SCRIPT_DIR}/quiesce_daemons.sh" resume 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
 
 pip install --prefer-binary --group test
 # Install torch up front (needs network). Moved ahead of the quiesce step below so we
