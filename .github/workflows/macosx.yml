@@ -21,14 +21,15 @@ jobs:
   # intermittent Mac test slowdown quickly.
   test:
     name: Test on Mac
+    # A/B experiment: MODE=control vs MODE=quiesce on the same (os, py). The quiesce
+    # arm SIGSTOPs the macOS consumer-daemon swarm (see quiesce_daemons.sh); the fix is
+    # confirmed if per-test teardown drops back to ~1s (from 150-380s) on the quiesce legs.
     strategy:
       fail-fast: false
       matrix:
         MAC_OS_VERSION: [26]
-        PYTHON_VERSION: ['3.10', '3.11', '3.12', '3.13']
-        include:
-          - MAC_OS_VERSION: 15
-            PYTHON_VERSION: '3.10'
+        PYTHON_VERSION: ['3.11', '3.12']
+        MODE: [control, quiesce]
     runs-on: macos-${{ matrix.MAC_OS_VERSION }}
     steps:
       - uses: actions/checkout@v4
@@ -42,19 +43,21 @@ jobs:
         run: |
           bash .github/workflows/scripts_new/macosx/3_install.sh
       - name: Mac OS X test
+        env:
+          QD_QUIESCE: ${{ matrix.MODE == 'quiesce' && '1' || '0' }}
         run: |
           bash .github/workflows/scripts_new/macosx/4_test.sh
       - name: Upload resource sampler log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mac_resource_log_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}
+          name: mac_resource_log_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}_${{ matrix.MODE }}
           path: ${{ runner.temp }}/resource_sampler.log
           if-no-files-found: warn
       - name: Upload deep captures (thread/fd/stack dumps on load spike)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mac_deep_capture_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}
+          name: mac_deep_capture_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}_${{ matrix.MODE }}
           path: ${{ runner.temp }}/deep_capture
           if-no-files-found: warn

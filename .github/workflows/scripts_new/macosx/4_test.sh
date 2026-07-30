@@ -5,6 +5,11 @@
 # prebuilt wheel is slightly out of sync with the checked-out test tree).
 set -x
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# QD_QUIESCE=1 (set per-matrix-leg in macosx.yml) SIGSTOPs the macOS consumer-daemon
+# swarm that otherwise floods the 3-vCPU run queue and starves the pytest workers.
+QD_QUIESCE="${QD_QUIESCE:-0}"
+
 export QD_FILE_TIMING=1
 export QD_FILE_TIMING_OUTPUT="${RUNNER_TEMP}/file_timing.md"
 
@@ -35,6 +40,11 @@ DEEP_MIN_GAP=90     # min seconds between deep captures
     uptime
     ps -A -o rss,pid,stat,comm | sort -rn | head -n 8
     echo
+    # On the quiesce arm, re-SIGSTOP any consumer daemons that launchd may have
+    # relaunched, so the run queue stays clear for the whole (multi-hour) run.
+    if [ "${QD_QUIESCE}" = "1" ]; then
+      bash "${SCRIPT_DIR}/quiesce_daemons.sh" restop >/dev/null 2>&1 || true
+    fi
     if [ "${deep_n}" -lt "${DEEP_MAX}" ] \
        && awk "BEGIN{exit !(${load1:-0} > ${LOAD_THRESH})}" \
        && [ $((now_epoch - last_deep)) -ge "${DEEP_MIN_GAP}" ]; then
@@ -70,7 +80,18 @@ SAMPLER_PID=$!
 trap 'kill "${SAMPLER_PID}" 2>/dev/null || true' EXIT
 
 pip install --prefer-binary --group test
+# Install torch up front (needs network). Moved ahead of the quiesce step below so we
+# can stop the network daemons for the test phases; identical ordering on both arms so
+# the only difference between control and quiesce is the quiesce itself.
+# TODO: revert to stable torch after 2.9.2 release
+pip install --pre --upgrade torch --index-url https://download.pytorch.org/whl/nightly/cpu
 export QD_LIB_DIR="$(python -c 'import quadrants as qd; print(qd.__path__[0])' | tail -n 1)/_lib/runtime"
+
+# Quiesce arm: now that all downloads are done, SIGSTOP the consumer-daemon swarm so
+# the CPU-bound teardown phase is not preempted into the ground on the 3-vCPU runner.
+if [ "${QD_QUIESCE}" = "1" ]; then
+  bash "${SCRIPT_DIR}/quiesce_daemons.sh" full | tee -a "$GITHUB_STEP_SUMMARY"
+fi
 
 # The C++ test binary is a build artifact; it won't exist when installing a prebuilt
 # wheel, so only run it if present.
@@ -83,9 +104,7 @@ fi
 # log); the sampler above captures the system-wide picture across all workers.
 /usr/bin/time -l python tests/run_tests.py -v -r 1 --arch metal,vulkan,cpu -m "not needs_torch"
 
-# Phase 2: install torch, run only torch tests
-# TODO: revert to stable torch after 2.9.2 release
-pip install --pre --upgrade torch --index-url https://download.pytorch.org/whl/nightly/cpu
+# Phase 2: torch was installed above; run only torch tests.
 /usr/bin/time -l python tests/run_tests.py -v -r 1 --arch metal,vulkan,cpu -m needs_torch
 
 if [ -f "$QD_FILE_TIMING_OUTPUT" ]; then
