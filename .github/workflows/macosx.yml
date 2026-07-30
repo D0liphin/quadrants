@@ -15,21 +15,21 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 jobs:
-  # NOTE: This is an experimental [DONOTMERGE] diagnostics branch. The build_mac and
-  # publish_pypi jobs have been removed; the test job installs a prebuilt wheel from
-  # PyPI instead of building from source (saves ~15-18 min), so we can iterate on the
-  # intermittent Mac test slowdown quickly.
+  # NOTE: Experimental [DONOTMERGE] diagnostics branch. build_mac and publish_pypi are
+  # removed; the test job installs a prebuilt wheel from PyPI (saves ~15-18 min) so we
+  # can iterate on the Mac test slowdown quickly.
   test:
     name: Test on Mac
-    # A/B experiment: MODE=control vs MODE=quiesce on the same (os, py). The quiesce
-    # arm SIGSTOPs the macOS consumer-daemon swarm (see quiesce_daemons.sh); the fix is
-    # confirmed if per-test teardown drops back to ~1s (from 150-380s) on the quiesce legs.
+    # A/B experiment: MODE=control vs MODE=disable on the same (os, py). The disable arm
+    # launchctl disable + bootout the macOS consumer-daemon swarm (fail-fast: a caller
+    # gets "service unavailable" instead of the indefinite hang SIGSTOP caused). The fix
+    # is confirmed if per-test teardown drops back to ~1s (from 150-380s) on disable legs.
     strategy:
       fail-fast: false
       matrix:
         MAC_OS_VERSION: [26]
-        PYTHON_VERSION: ['3.11', '3.12']
-        MODE: [control, quiesce]
+        PYTHON_VERSION: ['3.12']
+        MODE: [control, disable]
     runs-on: macos-${{ matrix.MAC_OS_VERSION }}
     steps:
       - uses: actions/checkout@v4
@@ -44,7 +44,7 @@ jobs:
           bash .github/workflows/scripts_new/macosx/3_install.sh
       - name: Mac OS X test
         env:
-          QD_QUIESCE: ${{ matrix.MODE == 'quiesce' && '1' || '0' }}
+          QD_FIX: ${{ matrix.MODE }}
         run: |
           bash .github/workflows/scripts_new/macosx/4_test.sh
       - name: Upload resource sampler log
