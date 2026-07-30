@@ -119,6 +119,12 @@ def _test_python(args, default_dir="python"):
             _sys.path.insert(0, test_dir)
         pytest_args += ["-p", "pytest_file_timing"]
 
+    # Escape hatch to append raw pytest args from the environment (e.g. "--forked" for the
+    # within-VM teardown A/B experiment). Whitespace-separated; appended verbatim.
+    _extra = os.environ.get("QD_EXTRA_PYTEST_ARGS", "").strip()
+    if _extra:
+        pytest_args += _extra.split()
+
     import pytest  # pylint: disable=C0415
 
     return int(pytest.main(pytest_args))
