@@ -9,6 +9,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # QD_QUIESCE=1 (set per-matrix-leg in macosx.yml) SIGSTOPs the macOS consumer-daemon
 # swarm that otherwise floods the 3-vCPU run queue and starves the pytest workers.
 QD_QUIESCE="${QD_QUIESCE:-0}"
+# Sentinel: the sampler must NOT stop any daemon until this file exists, which happens
+# only after all pip installs (network daemons must stay up for downloads). Without this
+# gate the sampler's periodic re-stop kills networking mid `pip install`, hanging the job.
+QUIESCE_READY="${RUNNER_TEMP}/quiesce_ready.flag"
+rm -f "${QUIESCE_READY}"
 
 export QD_FILE_TIMING=1
 export QD_FILE_TIMING_OUTPUT="${RUNNER_TEMP}/file_timing.md"
@@ -41,8 +46,9 @@ DEEP_MIN_GAP=90     # min seconds between deep captures
     ps -A -o rss,pid,stat,comm | sort -rn | head -n 8
     echo
     # On the quiesce arm, re-SIGSTOP any consumer daemons that launchd may have
-    # relaunched, so the run queue stays clear for the whole (multi-hour) run.
-    if [ "${QD_QUIESCE}" = "1" ]; then
+    # relaunched, so the run queue stays clear for the whole (multi-hour) run. Gated on
+    # the sentinel so we never stop networking before pip installs have finished.
+    if [ "${QD_QUIESCE}" = "1" ] && [ -f "${QUIESCE_READY}" ]; then
       bash "${SCRIPT_DIR}/quiesce_daemons.sh" restop >/dev/null 2>&1 || true
     fi
     if [ "${deep_n}" -lt "${DEEP_MAX}" ] \
@@ -91,6 +97,8 @@ export QD_LIB_DIR="$(python -c 'import quadrants as qd; print(qd.__path__[0])' |
 # the CPU-bound teardown phase is not preempted into the ground on the 3-vCPU runner.
 if [ "${QD_QUIESCE}" = "1" ]; then
   bash "${SCRIPT_DIR}/quiesce_daemons.sh" full | tee -a "$GITHUB_STEP_SUMMARY"
+  # Only now (all downloads done) allow the sampler's periodic re-stop to run.
+  touch "${QUIESCE_READY}"
 fi
 
 # The C++ test binary is a build artifact; it won't exist when installing a prebuilt
