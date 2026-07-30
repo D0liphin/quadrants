@@ -6,14 +6,21 @@
 set -x
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# QD_QUIESCE=1 (set per-matrix-leg in macosx.yml) SIGSTOPs the macOS consumer-daemon
-# swarm that otherwise floods the 3-vCPU run queue and starves the pytest workers.
-QD_QUIESCE="${QD_QUIESCE:-0}"
-# Sentinel: the sampler must NOT stop any daemon until this file exists, which happens
-# only after all pip installs (network daemons must stay up for downloads). Without this
-# gate the sampler's periodic re-stop kills networking mid `pip install`, hanging the job.
-QUIESCE_READY="${RUNNER_TEMP}/quiesce_ready.flag"
-rm -f "${QUIESCE_READY}"
+
+# QD_FIX selects the CPU-contention mitigation under test (all hang-free, unlike the
+# earlier SIGSTOP quiesce which blocked synchronous XPC callers):
+#   none    - control: change nothing (baseline slow run).
+#   deprio  - keep the consumer daemons alive but drop them to the background CPU/IO
+#             tier (renice +20 + taskpolicy -b) so they yield the 3 cores to pytest.
+#   disable - launchctl disable + bootout the consumer daemons (fail-fast: callers get
+#             "service unavailable" instead of hanging).
+QD_FIX="${QD_FIX:-none}"
+# Sentinel: the sampler's periodic re-apply must NOT touch any daemon until this file
+# exists, which happens only after all pip installs (network daemons must stay usable
+# for downloads). Without the gate we would throttle/remove networking mid `pip
+# install`.
+FIX_READY="${RUNNER_TEMP}/fix_ready.flag"
+rm -f "${FIX_READY}"
 
 export QD_FILE_TIMING=1
 export QD_FILE_TIMING_OUTPUT="${RUNNER_TEMP}/file_timing.md"
@@ -45,11 +52,14 @@ DEEP_MIN_GAP=90     # min seconds between deep captures
     uptime
     ps -A -o rss,pid,stat,comm | sort -rn | head -n 8
     echo
-    # On the quiesce arm, re-SIGSTOP any consumer daemons that launchd may have
-    # relaunched, so the run queue stays clear for the whole (multi-hour) run. Gated on
-    # the sentinel so we never stop networking before pip installs have finished.
-    if [ "${QD_QUIESCE}" = "1" ] && [ -f "${QUIESCE_READY}" ]; then
-      bash "${SCRIPT_DIR}/quiesce_daemons.sh" restop >/dev/null 2>&1 || true
+    # Re-apply the mitigation periodically to catch daemons launchd relaunched or that
+    # just woke from a timer. Gated on the sentinel so we never touch networking before
+    # pip installs have finished.
+    if [ -f "${FIX_READY}" ]; then
+      case "${QD_FIX}" in
+        deprio)  bash "${SCRIPT_DIR}/deprio_daemons.sh"  >/dev/null 2>&1 || true ;;
+        disable) bash "${SCRIPT_DIR}/disable_daemons.sh" >/dev/null 2>&1 || true ;;
+      esac
     fi
     if [ "${deep_n}" -lt "${DEEP_MAX}" ] \
        && awk "BEGIN{exit !(${load1:-0} > ${LOAD_THRESH})}" \
@@ -83,32 +93,27 @@ DEEP_MIN_GAP=90     # min seconds between deep captures
   done
 ) > "${RES_LOG}" 2>&1 &
 SAMPLER_PID=$!
-# On exit: stop the sampler FIRST (so it cannot re-SIGSTOP after we resume), then, on the
-# quiesce arm, SIGCONT the daemons so the upload-artifact steps and post-job cleanup run
-# on a normal system.
 cleanup() {
   kill "${SAMPLER_PID}" 2>/dev/null || true
-  if [ "${QD_QUIESCE}" = "1" ]; then
-    bash "${SCRIPT_DIR}/quiesce_daemons.sh" resume 2>/dev/null || true
-  fi
 }
 trap cleanup EXIT
 
 pip install --prefer-binary --group test
-# Install torch up front (needs network). Moved ahead of the quiesce step below so we
-# can stop the network daemons for the test phases; identical ordering on both arms so
-# the only difference between control and quiesce is the quiesce itself.
+# Install torch up front (needs network). Kept ahead of the mitigation step below so
+# the network daemons are still up/usable during downloads; the only difference between
+# the control and fix legs is the mitigation itself.
 # TODO: revert to stable torch after 2.9.2 release
 pip install --pre --upgrade torch --index-url https://download.pytorch.org/whl/nightly/cpu
 export QD_LIB_DIR="$(python -c 'import quadrants as qd; print(qd.__path__[0])' | tail -n 1)/_lib/runtime"
 
-# Quiesce arm: now that all downloads are done, SIGSTOP the consumer-daemon swarm so
-# the CPU-bound teardown phase is not preempted into the ground on the 3-vCPU runner.
-if [ "${QD_QUIESCE}" = "1" ]; then
-  bash "${SCRIPT_DIR}/quiesce_daemons.sh" full | tee -a "$GITHUB_STEP_SUMMARY"
-  # Only now (all downloads done) allow the sampler's periodic re-stop to run.
-  touch "${QUIESCE_READY}"
-fi
+# Apply the mitigation now that all downloads are done, then let the sampler re-apply it
+# periodically (gated on the sentinel).
+case "${QD_FIX}" in
+  deprio)  bash "${SCRIPT_DIR}/deprio_daemons.sh"  | tee -a "$GITHUB_STEP_SUMMARY" ;;
+  disable) bash "${SCRIPT_DIR}/disable_daemons.sh" | tee -a "$GITHUB_STEP_SUMMARY" ;;
+  none)    echo "QD_FIX=none (control): no CPU-contention mitigation applied" ;;
+esac
+touch "${FIX_READY}"
 
 # The C++ test binary is a build artifact; it won't exist when installing a prebuilt
 # wheel, so only run it if present.
