@@ -122,7 +122,25 @@ echo "python=$(python -V 2>&1) quadrants=$(python -c 'import quadrants as qd; pr
 # a pure logging line inserted after `arch = ...`; it does not change control flow.
 export GUARDLOG="${CRASH_OUT}/guardlog.txt"
 : > "${GUARDLOG}"
-perl -0pi -e 's|(    arch = qd\.lang\.impl\.current_cfg\(\)\.arch\n)|$1    import os as _os; open(_os.environ.get("GUARDLOG","/tmp/guardlog.txt"),"a").write("GUARDCHK dtype=%r arch=%r eq_vulkan=%r eq_metal=%r plat=%r\n" % (dtype, arch, arch==qd.vulkan, arch==qd.metal, _os.uname().sysname))\n|' tests/python/test_simt.py
+# Inject a pure logging line right after `arch = current_cfg().arch`. Use a here-doc'd
+# python patcher (not perl -pi, whose s/// replacement is double-quote-interpolated and turns
+# a "\n" inside the string into a real newline -> unterminated string literal) and build the
+# record's newline with chr(10) so there is no backslash-escape to mangle.
+cat > "${RUNNER_TEMP}/guard_instr.py" <<'PY'
+p = "tests/python/test_simt.py"
+s = open(p).read()
+anchor = "    arch = qd.lang.impl.current_cfg().arch\n"
+assert s.count(anchor) == 1, ("anchor count", s.count(anchor))
+log = (
+    '    import os as _os; open(_os.environ.get("GUARDLOG", "/tmp/guardlog.txt"), "a").write('
+    '"GUARDCHK dtype=%r arch=%r eq_vulkan=%r eq_metal=%r plat=%r" % '
+    '(dtype, arch, arch == qd.vulkan, arch == qd.metal, _os.uname().sysname) + chr(10))\n'
+)
+open(p, "w").write(s.replace(anchor, anchor + log, 1))
+print("patched guardlog into", p)
+PY
+python "${RUNNER_TEMP}/guard_instr.py"
+python -c "import ast; ast.parse(open('tests/python/test_simt.py').read()); print('test_simt.py parses OK')"
 grep -n -A2 "arch = qd.lang.impl.current_cfg().arch" tests/python/test_simt.py | head
 
 # NB: we run each repro DIRECTLY (not under lldb). lldb --batch on these macOS runners
