@@ -111,6 +111,20 @@ pip install --prefer-binary --group test
 export QD_LIB_DIR="$(python -c 'import quadrants as qd; print(qd.__path__[0])' | tail -n 1)/_lib/runtime"
 echo "python=$(python -V 2>&1) quadrants=$(python -c 'import quadrants as qd; print(getattr(qd,"__version__","?"))' 2>&1)"
 
+# --- instrument the f64 skip guard (root-cause probe) ----------------------------------
+# Confirmed interactively: in the full vulkan suite the abort hits at
+# test_subgroup_inclusive_mul_tiled[f64] and NO "SKIPPED" is printed, while the sibling
+# test_subgroup_inclusive_add_tiled[f64] SKIPS correctly seconds earlier. So the guard
+# _skip_if_f64_unsupported() (which pytest.skips f64 when current_cfg().arch == qd.vulkan on
+# Darwin) stops firing after enough accumulation -- current_cfg().arch drifts away from
+# qd.vulkan. Log what arch the guard actually sees on every call into an uploaded file so we
+# can read the value at the crashing test (the last GUARDCHK line before the abort). This is
+# a pure logging line inserted after `arch = ...`; it does not change control flow.
+export GUARDLOG="${CRASH_OUT}/guardlog.txt"
+: > "${GUARDLOG}"
+perl -0pi -e 's|(    arch = qd\.lang\.impl\.current_cfg\(\)\.arch\n)|$1    import os as _os; open(_os.environ.get("GUARDLOG","/tmp/guardlog.txt"),"a").write("GUARDCHK dtype=%r arch=%r eq_vulkan=%r eq_metal=%r plat=%r\n" % (dtype, arch, arch==qd.vulkan, arch==qd.metal, _os.uname().sysname))\n|' tests/python/test_simt.py
+grep -n -A2 "arch = qd.lang.impl.current_cfg().arch" tests/python/test_simt.py | head
+
 # NB: we run each repro DIRECTLY (not under lldb). lldb --batch on these macOS runners
 # stops at the initial exec and quits without ever running the program (stop reason=exec),
 # so it produced no data. Instead we let the process abort naturally; macOS ReportCrash
@@ -181,6 +195,15 @@ fi
   echo ""
   echo '```'
   cat "${STAGE_RESULTS}"
+  echo '```'
+  echo ""
+  echo "### Guard (_skip_if_f64_unsupported) arch drift"
+  echo "eq_vulkan=True calls: $(grep -c 'eq_vulkan=True'  "${GUARDLOG}" 2>/dev/null || echo 0); "\
+       "eq_vulkan=False calls: $(grep -c 'eq_vulkan=False' "${GUARDLOG}" 2>/dev/null || echo 0)"
+  echo ""
+  echo "Last 25 guard calls (the final line is the crashing test_subgroup_inclusive_mul_tiled[f64]):"
+  echo '```'
+  tail -n 25 "${GUARDLOG}" 2>/dev/null || echo "(no guardlog)"
   echo '```'
   echo ""
   echo "### Crash reports collected"
