@@ -21,7 +21,7 @@ jobs:
   test:
     name: Test on Mac
     # Within-VM A/B: run the SAME phase-1 workload twice back-to-back in one job - once
-    # with `--forked` (candidate: teardown == process exit) and once in-process
+    # with per-worker thread pools capped to 1 (candidate) and once uncapped
     # (baseline: reproduces the collapse). Same VM for both arms, so the bimodal
     # runner-lottery variance that confounds separate control/fix legs is cancelled.
     strategy:
@@ -44,7 +44,7 @@ jobs:
           QD_VERSION: ${{ github.event.inputs.quadrants_version }}
         run: |
           bash .github/workflows/scripts_new/macosx/3_install.sh
-      - name: Mac OS X within-VM A/B (forked vs in-process)
+      - name: Mac OS X within-VM A/B (thread-capped vs in-process)
         run: |
           bash .github/workflows/scripts_new/macosx/withinvm_ab.sh
       - name: Upload resource sampler log
@@ -61,7 +61,7 @@ jobs:
           name: mac_withinvm_timings_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}
           path: |
             ${{ runner.temp }}/withinvm_summary.txt
-            ${{ runner.temp }}/file_timing_forked.md
+            ${{ runner.temp }}/file_timing_threadcap.md
             ${{ runner.temp }}/file_timing_baseline.md
           if-no-files-found: warn
       - name: Upload deep captures (thread/fd/stack dumps on load spike)

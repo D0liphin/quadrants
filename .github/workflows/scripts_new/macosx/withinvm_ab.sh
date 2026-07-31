@@ -9,14 +9,17 @@
 # job (one VM), so the VM factor cancels and any wall-time delta is attributable to the
 # arm itself.
 #
-# Arm B (candidate): `--forked` runs each test in its own forked subprocess, so teardown
-# is process exit instead of the in-process qd.reset() accumulation the collapse lives
-# in. genesis-world runs `--forked` and never collapses.
-# Arm A (baseline): the current in-process invocation (reproduces the collapse).
+# Arm B (candidate): cap the per-worker thread fan-out (OMP/MKL/OpenBLAS/vecLib/NumExpr =
+# 1). The runner has 3 cores so xdist already uses only 3 workers; the ~300 runnable
+# threads that starve the run queue during teardown come from each worker's BLAS/OMP/
+# torch thread pools, not from the worker count. Capping them to 1 cuts the swarm at the
+# source while keeping the warm worker process (no per-test cold re-init, unlike
+# --forked).
+# Arm A (baseline): the current uncapped in-process invocation (reproduces the collapse).
 #
-# We run the candidate FIRST so its (expected fast) result is always captured even if the
-# baseline arm later collapses and runs long; the two pytest sessions are independent
-# (fresh offline cache per invocation) so order does not contaminate the comparison.
+# We run the candidate FIRST so its result is always captured even if the baseline arm
+# later collapses and runs long; the two pytest sessions are independent (fresh offline
+# cache per invocation) so order does not contaminate the comparison.
 
 set -x
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,8 +81,6 @@ trap cleanup EXIT
 pip install --prefer-binary --group test
 # TODO: revert to stable torch after 2.9.2 release
 pip install --pre --upgrade torch --index-url https://download.pytorch.org/whl/nightly/cpu
-# pytest-forked provides the `--forked` flag used by the candidate arm.
-pip install pytest-forked
 export QD_LIB_DIR="$(python -c 'import quadrants as qd; print(qd.__path__[0])' | tail -n 1)/_lib/runtime"
 
 run_phase() {
@@ -96,22 +97,25 @@ run_phase() {
   echo "WITHINVM_RESULT ${label} elapsed_s=$(( t1 - t0 )) rc=${rc}" >> "${SUMMARY}"
 }
 
-# Candidate first: each test forked into its own subprocess (teardown == process exit).
-run_phase forked env QD_EXTRA_PYTEST_ARGS="--forked" \
+# Candidate first: per-worker thread pools capped to 1 (set before python starts so torch
+# picks OMP_NUM_THREADS=1 at import). Same warm worker process, just fewer threads.
+run_phase threadcap env \
+    OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+    VECLIB_MAXIMUM_THREADS=1 NUMEXPR_NUM_THREADS=1 \
   /usr/bin/time -l python tests/run_tests.py -v -r 1 --arch "${ARCHES}" -m "not needs_torch"
 
 # Rename the per-phase file-timing so the baseline arm's does not overwrite it.
-[ -f "${QD_FILE_TIMING_OUTPUT}" ] && mv "${QD_FILE_TIMING_OUTPUT}" "${RUNNER_TEMP}/file_timing_forked.md"
+[ -f "${QD_FILE_TIMING_OUTPUT}" ] && mv "${QD_FILE_TIMING_OUTPUT}" "${RUNNER_TEMP}/file_timing_threadcap.md"
 
-# Baseline: current in-process invocation (reproduces the collapse on a bad VM).
-run_phase baseline env -u QD_EXTRA_PYTEST_ARGS \
+# Baseline: current uncapped in-process invocation (reproduces the collapse on a bad VM).
+run_phase baseline \
   /usr/bin/time -l python tests/run_tests.py -v -r 1 --arch "${ARCHES}" -m "not needs_torch"
 
 [ -f "${QD_FILE_TIMING_OUTPUT}" ] && mv "${QD_FILE_TIMING_OUTPUT}" "${RUNNER_TEMP}/file_timing_baseline.md"
 
 # --- job summary --------------------------------------------------------------------
 {
-  echo "## Within-VM A/B: --forked (candidate) vs in-process (baseline)"
+  echo "## Within-VM A/B: thread-capped (candidate) vs uncapped in-process (baseline)"
   echo "Both arms ran the same 'not needs_torch' phase-1 workload (arch=${ARCHES}) on the"
   echo "SAME runner VM, so runner-lottery variance is cancelled."
   echo ""
