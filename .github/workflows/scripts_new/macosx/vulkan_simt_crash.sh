@@ -133,8 +133,9 @@ anchor = "    arch = qd.lang.impl.current_cfg().arch\n"
 assert s.count(anchor) == 1, ("anchor count", s.count(anchor))
 log = (
     '    import os as _os; open(_os.environ.get("GUARDLOG", "/tmp/guardlog.txt"), "a").write('
-    '"GUARDCHK dtype=%r arch=%r eq_vulkan=%r eq_metal=%r plat=%r" % '
-    '(dtype, arch, arch == qd.vulkan, arch == qd.metal, _os.uname().sysname) + chr(10))\n'
+    '"GUARDCHK to=%s eqf64=%s idn=%s idf=%s arch=%s eq_vulkan=%s plat=%s" % '
+    '(getattr(dtype, "to_string", lambda: str(dtype))(), dtype == qd.f64, id(dtype), id(qd.f64), '
+    'arch, arch == qd.vulkan, _os.uname().sysname) + chr(10))\n'
 )
 open(p, "w").write(s.replace(anchor, anchor + log, 1))
 print("patched guardlog into", p)
