@@ -19,13 +19,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 jobs:
-  # [DONOTMERGE] diagnostic branch for the vulkan SIMT f64 subgroup SIGABRT
-  # (test_subgroup_inclusive_mul_tiled[arch=vulkan, dtype=f64] -> Abort trap: 6). Confirmed
-  # to reproduce ONLY on a wheel built from main (the published 1.2.0 raises a clean
-  # "Type f64 not supported" instead), and ONLY after the full vulkan suite accumulates
-  # (test_simt.py alone does not crash). To avoid a ~16-min rebuild every iteration this
-  # DOWNLOADS the prebuilt main wheel from a prior build run (wheel_run_id) instead of
-  # building. Set debug_tmate=true (workflow_dispatch) to open an interactive tmate session.
+  # [DONOTMERGE] diagnostic branch validating fix(1) for the vulkan-leg SIGABRT.
+  # Root cause (production .ips): VulkanStream::submit()'s vkQueueSubmit fails once process-wide
+  # MoltenVK/Metal state accumulates across the suite, and BAIL_ON_VK_BAD_RESULT_NO_RETURN routed
+  # that to RHI_ASSERT -> assert() -> abort() (hard crash, no traceback) inside a qd.reset()
+  # teardown flush. fix(1) makes submit() throw QuadrantsRuntimeError instead. This job BUILDS
+  # quadrants FROM THIS BRANCH (so the C++ change is included) and runs the serial (-t 1) vulkan
+  # suite that reliably aborted: expect abort->recoverable exception (Stage 4b, no more .ips) and
+  # fix(1)+worker-recycle to reach 100% (Stage 5). Also logs RSS per test (investigation 2).
   vulkan_simt_crash:
     name: Vulkan SIMT crash repro
     strategy:
@@ -34,7 +35,7 @@ jobs:
         MAC_OS_VERSION: [26]
         PYTHON_VERSION: ['3.12']
     runs-on: macos-${{ matrix.MAC_OS_VERSION }}
-    timeout-minutes: 75
+    timeout-minutes: 150
     permissions:
       contents: read
       actions: read
@@ -45,17 +46,13 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.PYTHON_VERSION }}
-      - name: Download prebuilt main wheel from a prior build run
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Mac OS X prerequisites
         run: |
-          set -ex
-          RID="${{ github.event.inputs.wheel_run_id }}"
-          RID="${RID:-30635690618}"
-          gh run download "$RID" --repo "${{ github.repository }}" -n mac_wheel_26_cp312 -D dist
-          gh run download "$RID" --repo "${{ github.repository }}" -n mac_cpptests_26_cp312 -D build || true
-          ls -la dist build 2>/dev/null || true
-      - name: Install prebuilt wheel
+          bash .github/workflows/scripts_new/macosx/1_prerequisites.sh
+      - name: Mac OS X build (from this branch, includes fix(1))
+        run: |
+          bash .github/workflows/scripts_new/macosx/2_build.sh
+      - name: Mac OS X install
         run: |
           bash .github/workflows/scripts_new/macosx/3_install.sh
       - name: Interactive tmate session (dispatch-gated)

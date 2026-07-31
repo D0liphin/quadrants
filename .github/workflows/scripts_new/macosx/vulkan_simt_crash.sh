@@ -156,7 +156,9 @@ grep -n -A2 "arch = qd.lang.impl.current_cfg().arch" tests/python/test_simt.py |
 # (the suite kills+restarts an xdist worker on failure to reset GPU state; at -t 1 there is
 # no worker to recycle, so state accumulates until the driver aborts).
 export PHASELOG="${CRASH_OUT}/phaselog.txt"
+export RSSLOG="${CRASH_OUT}/rsslog.txt"
 : > "${PHASELOG}"
+: > "${RSSLOG}"
 cat >> tests/python/conftest.py <<'PY'
 
 
@@ -165,6 +167,38 @@ def _qd_phaselog(when, nodeid):
     try:
         with open(os.environ.get("PHASELOG", "/tmp/phaselog.txt"), "a") as _f:
             _f.write(when + " " + str(nodeid) + "\n")
+    except Exception:
+        pass
+
+
+# --- DIAG (investigation 2): per-test resident-set size, to see whether process-wide
+# Metal/MoltenVK/host state grows monotonically across qd.init()/qd.reset() cycles (leak-like)
+# or stays flat (pure driver-handle exhaustion). Uses ru_maxrss (peak, monotonic) plus a live
+# RSS read via `ps` so we can distinguish a rising-then-plateau curve from unbounded growth.
+import resource as _qd_resource
+
+_qd_test_counter = [0]
+
+
+def _qd_live_rss_kb():
+    try:
+        import subprocess as _sp
+
+        out = _sp.check_output(["ps", "-o", "rss=", "-p", str(os.getpid())], text=True)
+        return int(out.strip())
+    except Exception:
+        return -1
+
+
+def _qd_rsslog(nodeid):
+    _qd_test_counter[0] += 1
+    n = _qd_test_counter[0]
+    # ru_maxrss is bytes on macOS, kB on Linux; record raw + normalize to kB for macOS runners.
+    maxrss = _qd_resource.getrusage(_qd_resource.RUSAGE_SELF).ru_maxrss
+    maxrss_kb = maxrss // 1024 if maxrss > 10_000_000 else maxrss
+    try:
+        with open(os.environ.get("RSSLOG", "/tmp/rsslog.txt"), "a") as _f:
+            _f.write("%d live_rss_kb=%d max_rss_kb=%d %s\n" % (n, _qd_live_rss_kb(), maxrss_kb, str(nodeid)))
     except Exception:
         pass
 
@@ -179,6 +213,7 @@ def pytest_runtest_call(item):
 
 def pytest_runtest_teardown(item, nextitem):
     _qd_phaselog("TEARDOWN", item.nodeid)
+    _qd_rsslog(item.nodeid)
 PY
 python -c "import ast; ast.parse(open('tests/python/conftest.py').read()); print('conftest.py parses OK')"
 
@@ -255,28 +290,36 @@ run_stage repro_full_vulkan_recycle \
 
 # --- job summary -----------------------------------------------------------------------
 {
-  echo "## Vulkan SIMT subgroup crash diagnostics"
+  echo "## Vulkan SIMT crash: fix(1) validation + accumulation probe"
   echo ""
-  echo "Crashing case: test_subgroup_inclusive_mul_tiled[arch=vulkan, dtype=f64] (Abort trap: 6)."
+  echo "fix(1): VulkanStream::submit() now throws QuadrantsRuntimeError on vkQueueSubmit failure"
+  echo "instead of RHI_ASSERT->assert->abort(). Expect Stage 4b (repro_full_vulkan, no recycle)"
+  echo "to change from rc=134 (Abort trap: 6) to a recoverable rc!=134, and repro_full_vulkan_recycle"
+  echo "(fix(1)+worker recycle) to reach 100% (rc=0)."
   echo ""
   echo '```'
   cat "${STAGE_RESULTS}"
   echo '```'
   echo ""
-  echo "### Guard (_skip_if_f64_unsupported) arch drift"
-  echo "eq_vulkan=True calls: $(grep -c 'eq_vulkan=True'  "${GUARDLOG}" 2>/dev/null || echo 0); "\
-       "eq_vulkan=False calls: $(grep -c 'eq_vulkan=False' "${GUARDLOG}" 2>/dev/null || echo 0)"
-  echo ""
-  echo "Last 25 guard calls:"
+  echo "### Phase log tail (final line = test+phase where the run stopped)"
   echo '```'
-  tail -n 25 "${GUARDLOG}" 2>/dev/null || echo "(no guardlog)"
+  tail -n 30 "${PHASELOG}" 2>/dev/null || echo "(no phaselog)"
   echo '```'
   echo ""
-  echo "### Phase log tail (final line = test+phase where MoltenVK aborted)"
+  echo "### Investigation (2): RSS vs test index (leak-like growth vs flat)"
   echo '```'
-  tail -n 40 "${PHASELOG}" 2>/dev/null || echo "(no phaselog)"
+  if [ -s "${RSSLOG}" ]; then
+    total=$(wc -l < "${RSSLOG}")
+    echo "total tests logged: ${total}"
+    echo "-- sampled every ~100 tests --"
+    awk 'NR==1 || NR%100==0' "${RSSLOG}"
+    echo "-- last 5 --"
+    tail -n 5 "${RSSLOG}"
+  else
+    echo "(no rsslog)"
+  fi
   echo '```'
   echo ""
-  echo "### Crash reports collected"
-  ls -1 "${CRASH_OUT}" 2>/dev/null || echo "(none)"
+  echo "### Crash reports collected (should be EMPTY if fix(1) works - no more abort)"
+  ls -1 "${CRASH_OUT}"/*.ips 2>/dev/null || echo "(no .ips - good, means no abort)"
 } >> "$GITHUB_STEP_SUMMARY"

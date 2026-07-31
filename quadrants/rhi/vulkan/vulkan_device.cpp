@@ -11,6 +11,7 @@
 #include "quadrants/rhi/vulkan/vulkan_utils.h"
 #include "quadrants/rhi/vulkan/vulkan_loader.h"
 #include "quadrants/rhi/vulkan/vulkan_device.h"
+#include "quadrants/common/exceptions.h"
 
 #include "spirv_reflect.h"
 
@@ -1877,9 +1878,23 @@ StreamSemaphore VulkanStream::submit(CommandList *cmdlist_, const std::vector<St
   // Resource tracking, check previously submitted commands
   submitted_cmdbuffers_.push_back(TrackedCmdbuf{fence, buffer});
 
-  BAIL_ON_VK_BAD_RESULT_NO_RETURN(vkQueueSubmit(queue_, /*submitCount=*/1, &submit_info,
-                                                /*fence=*/fence->fence),
-                                  "Vulkan device might be lost (vkQueueSubmit failed)");
+  // A failed vkQueueSubmit here is recoverable and must be *reportable*, not fatal. On MoltenVK it
+  // surfaces (VK_ERROR_DEVICE_LOST / VK_ERROR_OUT_OF_*_MEMORY) once long-lived, process-wide Metal/
+  // MoltenVK state accumulates across many qd.init()/qd.reset() cycles and the command queue can no
+  // longer accept work -- typically during the flush inside a qd.reset() teardown. The old
+  // BAIL_ON_VK_BAD_RESULT_NO_RETURN path routed this to RHI_ASSERT -> assert() -> abort(), which kills
+  // the whole interpreter with no Python traceback (and, under pytest-xdist, no clean way to recycle
+  // the worker). Raise a QuadrantsRuntimeError instead so the Python layer sees a normal exception and
+  // the caller (test harness, application) can reset()/recycle and carry on.
+  VkResult submit_result =
+      vkQueueSubmit(queue_, /*submitCount=*/1, &submit_info, /*fence=*/fence->fence);
+  if (submit_result != VK_SUCCESS) {
+    throw QuadrantsRuntimeError(
+        fmt::format("vkQueueSubmit failed (VkResult={}): the Vulkan device was lost or is out of "
+                    "resources. On MoltenVK this typically follows accumulation of process-wide "
+                    "Metal state across many qd.init()/qd.reset() cycles.",
+                    (int)submit_result));
+  }
 
   return std::make_shared<VulkanStreamSemaphoreObject>(semaphore);
 }
