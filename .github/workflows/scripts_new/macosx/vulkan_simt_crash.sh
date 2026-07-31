@@ -147,13 +147,25 @@ run_stage f64_mul_noskip_lldb \
   "${PYBIN}" tests/run_tests.py test_simt -k "test_subgroup_inclusive_mul_tiled and dtype3" --arch vulkan -t 1 -v
 cp "${RUNNER_TEMP}/test_simt.orig.py" tests/python/test_simt.py   # restore
 
-# --- Stage 4: faithful multi-arch serial repro of the CI crash, under lldb -------------
-# The failing CI leg ran `--arch metal,vulkan,cpu -m "not needs_torch"` with a single
-# serial worker and aborted at ~63%. Reproduce the exact command (bounded: it aborts
-# ~18 min in) so lldb captures the faulting thread's native backtrace.
-run_stage multiarch_full_repro_lldb \
+# --- Stage 4a: vulkan-only test_simt.py, serial, under lldb ----------------------------
+# The failing production leg is VULKAN-ONLY (MAC_TEST_ARCH=vulkan) with a single serial
+# worker; it aborts at ~63% in test_subgroup_inclusive_mul_tiled[f64] even though that
+# same test SKIPS in isolation (stage 2). So the skip guard misses only after the vulkan
+# suite accumulates. Try to reproduce with just test_simt.py first (fast).
+run_stage repro_test_simt_vulkan_lldb \
   lldb --batch -o "run" -k "thread backtrace all" -k "quit" -- \
-  "${PYBIN}" tests/run_tests.py -v -r 1 --arch metal,vulkan,cpu -m "not needs_torch" -t 1
+  "${PYBIN}" tests/run_tests.py test_simt --arch vulkan -t 1 -v
+
+# --- Stage 4b: full vulkan-only "not needs_torch" repro (only if 4a did not crash) -----
+# The exact failing-leg command. Bounded: the production legs aborted ~18 min in.
+if ls "${CRASH_OUT}"/repro_test_simt_vulkan_lldb__* >/dev/null 2>&1; then
+  echo "test_simt-only already reproduced the crash; skipping full vulkan repro"
+  echo "STAGE_RESULT repro_full_vulkan skipped" >> "${STAGE_RESULTS}"
+else
+  run_stage repro_full_vulkan_lldb \
+    lldb --batch -o "run" -k "thread backtrace all" -k "quit" -- \
+    "${PYBIN}" tests/run_tests.py -v -r 1 --arch vulkan -m "not needs_torch" -t 1
+fi
 
 # --- job summary -----------------------------------------------------------------------
 {
