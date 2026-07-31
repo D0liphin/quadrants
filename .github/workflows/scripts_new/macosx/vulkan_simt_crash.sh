@@ -244,6 +244,15 @@ else
     python tests/run_tests.py -v -r 1 --arch vulkan -m "not needs_torch" -t 1
 fi
 
+# --- Stage 5: FIX VALIDATION - same serial vulkan command, but with proactive worker recycle --
+# Stage 4b (no recycle, -t 1, no xdist worker) hard-aborts ~63% in GfxRuntime::flush()'s
+# QD_ASSERT once MoltenVK/VulkanStream state accumulates. QD_WORKER_RECYCLE_EVERY makes
+# run_tests.py force a single xdist worker even at -t 1, and conftest recycles that worker every
+# N completed tests, bounding the accumulation. Expected: rc=0 (reaches 100%) instead of rc=134.
+run_stage repro_full_vulkan_recycle \
+  env QD_WORKER_RECYCLE_EVERY=25 \
+  python tests/run_tests.py -v -r 1 --arch vulkan -m "not needs_torch" -t 1
+
 # --- job summary -----------------------------------------------------------------------
 {
   echo "## Vulkan SIMT subgroup crash diagnostics"

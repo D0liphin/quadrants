@@ -102,10 +102,17 @@ def _test_python(args, default_dir="python"):
         pytest_args += ["-s"]
         print(f"Due to how pytest-xdist is implemented, the -s option does not work with multiple thread...")
     else:
-        if int(threads) > 1:
-            # We intentionally kill workers on test failure (see conftest.py) to reset GPU state.  Stock xdist counts
-            # each kill toward --max-worker-restart and shuts down the session when the cap is reached, so we set a
-            # very high cap to prevent that.
+        # We intentionally kill workers on test failure (see conftest.py) to reset GPU state.  Stock xdist counts
+        # each kill toward --max-worker-restart and shuts down the session when the cap is reached, so we set a
+        # very high cap to prevent that.  We normally only bother with xdist for threads>1, but when
+        # QD_WORKER_RECYCLE_EVERY is set we force a single worker even at threads==1 so the proactive-recycle hook
+        # (which needs a live xdist worker to os._exit) has a process to restart -- this is what makes a serial (-t 1)
+        # vulkan run survivable instead of hard-aborting once MoltenVK state accumulates.
+        try:
+            recycle_on = int(os.environ.get("QD_WORKER_RECYCLE_EVERY", "0") or "0") > 0
+        except ValueError:
+            recycle_on = False
+        if int(threads) > 1 or recycle_on:
             pytest_args += [
                 "-n",
                 str(threads),

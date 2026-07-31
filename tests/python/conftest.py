@@ -156,29 +156,59 @@ def pytest_unconfigure(config):
     os.environ.pop("_QD_XDIST_EXIT_MARKER_DIR", None)
 
 
-@pytest.hookimpl(trylast=True)
-def pytest_runtest_logreport(report):
-    """Kill the xdist worker process after a test failure so it restarts with clean GPU state.
+def _qd_recycle_worker(nodeid):
+    """Write the intentional-exit marker and ``os._exit(1)`` so xdist restarts this worker clean.
 
-    Runs trylast so xdist's own hook sends the real test report over the channel first.  Before exiting, we write a
-    marker file so the controller's pytest_handlecrashitem can distinguish this intentional exit from a genuine crash
-    (segfault, OOM, etc.).
+    The controller's ``pytest_handlecrashitem`` uses the marker to tell this deliberate exit apart from a genuine
+    crash. Never returns.
     """
-    if not os.environ.get("PYTEST_XDIST_WORKER"):
-        return
-
-    if report.outcome not in ("error", "failed"):
-        return
-
     d = _exit_marker_dir()
     if d:
         worker_id = os.environ["PYTEST_XDIST_WORKER"]
         try:
             with open(os.path.join(d, worker_id), "w") as f:
-                f.write(report.nodeid)
+                f.write(nodeid)
         except OSError:
             pass
     os._exit(1)
+
+
+# Per-worker count of completed tests since this process last (re)started; used by the proactive recycle below.
+_qd_tests_since_recycle = 0
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_logreport(report):
+    """Kill the xdist worker process so it restarts with clean GPU state.
+
+    Two triggers, both requiring a live xdist worker:
+
+    * After a test failure -- resets any GPU state a failing kernel left behind.
+    * Proactively every ``QD_WORKER_RECYCLE_EVERY`` completed tests (opt-in; unset/0 disables). This bounds
+      driver-state accumulation that otherwise grows across the suite: ``VulkanStream::submit`` keeps every submitted
+      command buffer + fence in ``submitted_cmdbuffers_`` until a ``wait_idle``, and MoltenVK's encoder state grows with
+      it, until ``GfxRuntime::flush()`` can no longer create a command list and its ``QD_ASSERT`` aborts the process
+      during a ``qd.reset()`` teardown. Recycling a fresh process every N tests caps that growth, so the vulkan leg no
+      longer hard-aborts at ``-t 1`` (and stops slowly starving the runner at ``-t 2``).
+
+    Runs trylast so xdist's own hook ships the real report over the channel before we exit.
+    """
+    if not os.environ.get("PYTEST_XDIST_WORKER"):
+        return
+
+    if report.outcome in ("error", "failed"):
+        _qd_recycle_worker(report.nodeid)  # never returns
+
+    # Count one completed test on its teardown report, then recycle if we hit the (opt-in) cap.
+    if report.when == "teardown":
+        global _qd_tests_since_recycle
+        _qd_tests_since_recycle += 1
+        try:
+            every = int(os.environ.get("QD_WORKER_RECYCLE_EVERY", "0") or "0")
+        except ValueError:
+            every = 0
+        if every > 0 and _qd_tests_since_recycle >= every:
+            _qd_recycle_worker(report.nodeid)  # never returns
 
 
 def pytest_handlecrashitem(crashitem, report, sched):
