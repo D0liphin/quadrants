@@ -144,6 +144,40 @@ python "${RUNNER_TEMP}/guard_instr.py"
 python -c "import ast; ast.parse(open('tests/python/test_simt.py').read()); print('test_simt.py parses OK')"
 grep -n -A2 "arch = qd.lang.impl.current_cfg().arch" tests/python/test_simt.py | head
 
+# --- phase log ------------------------------------------------------------------------
+# The guard only runs in a test's body (call phase), so it cannot see an abort that happens
+# in per-test setup/teardown (the @test_utils.test(arch=qd.gpu) qd.init/reset + MoltenVK
+# GPU-context churn). Append setup/call/teardown hooks so the LAST line before the abort is
+# the exact test + phase where MoltenVK died -- and preceding lines show any failing test
+# (the suite kills+restarts an xdist worker on failure to reset GPU state; at -t 1 there is
+# no worker to recycle, so state accumulates until the driver aborts).
+export PHASELOG="${CRASH_OUT}/phaselog.txt"
+: > "${PHASELOG}"
+cat >> tests/python/conftest.py <<'PY'
+
+
+# --- DIAG (vulkan_simt_crash.sh): per-phase logger to locate the MoltenVK abort ---
+def _qd_phaselog(when, nodeid):
+    try:
+        with open(os.environ.get("PHASELOG", "/tmp/phaselog.txt"), "a") as _f:
+            _f.write(when + " " + str(nodeid) + "\n")
+    except Exception:
+        pass
+
+
+def pytest_runtest_setup(item):
+    _qd_phaselog("SETUP", item.nodeid)
+
+
+def pytest_runtest_call(item):
+    _qd_phaselog("CALL", item.nodeid)
+
+
+def pytest_runtest_teardown(item, nextitem):
+    _qd_phaselog("TEARDOWN", item.nodeid)
+PY
+python -c "import ast; ast.parse(open('tests/python/conftest.py').read()); print('conftest.py parses OK')"
+
 # NB: we run each repro DIRECTLY (not under lldb). lldb --batch on these macOS runners
 # stops at the initial exec and quits without ever running the program (stop reason=exec),
 # so it produced no data. Instead we let the process abort naturally; macOS ReportCrash
@@ -220,9 +254,14 @@ fi
   echo "eq_vulkan=True calls: $(grep -c 'eq_vulkan=True'  "${GUARDLOG}" 2>/dev/null || echo 0); "\
        "eq_vulkan=False calls: $(grep -c 'eq_vulkan=False' "${GUARDLOG}" 2>/dev/null || echo 0)"
   echo ""
-  echo "Last 25 guard calls (the final line is the crashing test_subgroup_inclusive_mul_tiled[f64]):"
+  echo "Last 25 guard calls:"
   echo '```'
   tail -n 25 "${GUARDLOG}" 2>/dev/null || echo "(no guardlog)"
+  echo '```'
+  echo ""
+  echo "### Phase log tail (final line = test+phase where MoltenVK aborted)"
+  echo '```'
+  tail -n 40 "${PHASELOG}" 2>/dev/null || echo "(no phaselog)"
   echo '```'
   echo ""
   echo "### Crash reports collected"
