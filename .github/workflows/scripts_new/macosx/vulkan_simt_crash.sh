@@ -180,25 +180,17 @@ import resource as _qd_resource
 _qd_test_counter = [0]
 
 
-def _qd_live_rss_kb():
-    try:
-        import subprocess as _sp
-
-        out = _sp.check_output(["ps", "-o", "rss=", "-p", str(os.getpid())], text=True)
-        return int(out.strip())
-    except Exception:
-        return -1
-
-
 def _qd_rsslog(nodeid):
     _qd_test_counter[0] += 1
     n = _qd_test_counter[0]
-    # ru_maxrss is bytes on macOS, kB on Linux; record raw + normalize to kB for macOS runners.
+    # Fork-free (no per-test `ps` subprocess -- that both perturbs the run and gets more expensive as
+    # RSS grows, confounding the very measurement). ru_maxrss is bytes on macOS, kB on Linux; a rising
+    # peak across tests = accumulation, a plateau = bounded.
     maxrss = _qd_resource.getrusage(_qd_resource.RUSAGE_SELF).ru_maxrss
     maxrss_kb = maxrss // 1024 if maxrss > 10_000_000 else maxrss
     try:
         with open(os.environ.get("RSSLOG", "/tmp/rsslog.txt"), "a") as _f:
-            _f.write("%d live_rss_kb=%d max_rss_kb=%d %s\n" % (n, _qd_live_rss_kb(), maxrss_kb, str(nodeid)))
+            _f.write("%d max_rss_kb=%d %s\n" % (n, maxrss_kb, str(nodeid)))
     except Exception:
         pass
 
@@ -217,88 +209,102 @@ def pytest_runtest_teardown(item, nextitem):
 PY
 python -c "import ast; ast.parse(open('tests/python/conftest.py').read()); print('conftest.py parses OK')"
 
-# NB: we run each repro DIRECTLY (not under lldb). lldb --batch on these macOS runners
-# stops at the initial exec and quits without ever running the program (stop reason=exec),
-# so it produced no data. Instead we let the process abort naturally; macOS ReportCrash
-# writes an .ips crash report (with the faulting-thread backtrace) that collect_and_dump
-# parses. This wheel is BUILT FROM main (the published 1.2.0 gives a clean "Type f64 not
-# supported" error and does not reproduce the abort).
+# We let the process abort naturally if fix(1) is absent; macOS ReportCrash writes an .ips (with the
+# faulting-thread backtrace) that collect_and_dump parses. This wheel is BUILT FROM THIS BRANCH, so
+# fix(1) (VulkanStream::submit throws instead of RHI_ASSERT/abort) is compiled in. The f64-guard
+# stages are gone (already answered: f64 is a red herring; the abort is submit() during teardown).
+#
+# Every heavy stage is wrapped in `timeout` so that even on a slow/"bad-VM-lottery" runner the job
+# never hits the hard job-level timeout (which would SKIP the always() upload step and lose all
+# artifacts). Order matters: the FAST, VM-robust validations run first, the slow authentic repro last.
 
-# --- Stage 1: does plain (non-subgroup) f64 field I/O abort on vulkan? -----------------
-# Tests the broad claim in the skip message ("MoltenVK does not support f64"). If this
-# aborts, f64 is fundamentally unusable on vulkan/Darwin; if it raises a clean Python
-# error, f64 fails gracefully and only some other path aborts.
-PROBE="${RUNNER_TEMP}/probe_f64.py"
-cat > "${PROBE}" <<'PY'
-import platform
+# --- Stage A (fast, ~minutes): controlled saturation probe -----------------------------
+# Directly drives the accumulation the real suite triggers only after ~1000 tests: N cycles of
+# init(vulkan) -> compile+launch a fresh kernel (new pipeline each cycle) -> readback (submit+sync)
+# -> reset(). Answers BOTH questions quickly and VM-independently:
+#   fix(1): if submit fails it should raise RuntimeError (rc=1, "THREW"), NOT Abort trap:6 (rc=134,.ips).
+#   leak(2): ru_maxrss per cycle -> monotonic climb (host accumulation) vs plateau (driver-handle only).
+SATPROBE="${RUNNER_TEMP}/saturate_probe.py"
+cat > "${SATPROBE}" <<'PY'
+import os, resource
 import quadrants as qd
-qd.init(arch=qd.vulkan)
-cfg = qd.lang.impl.current_cfg()
-print("PROBE cfg.arch=", cfg.arch, "qd.vulkan=", qd.vulkan, "Darwin=", platform.system() == "Darwin")
-f = qd.field(dtype=qd.f64, shape=8)
-@qd.kernel
-def fill():
-    for i in range(8):
-        f[i] = 1.5 * i
-fill()
-print("PROBE f64 basic field I/O OK:", f.to_numpy())
+
+RSSLOG = os.environ.get("SAT_RSSLOG", "/tmp/sat_rss.txt")
+open(RSSLOG, "w").close()
+N = int(os.environ.get("SAT_CYCLES", "6000"))
+print("SATURATE probe: up to %d init/reset+submit cycles on vulkan" % N, flush=True)
+
+
+def _rss_kb():
+    r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return r // 1024 if r > 10_000_000 else r
+
+
+i = 0
+try:
+    for i in range(N):
+        qd.init(arch=qd.vulkan)
+        m = 256 + (i % 128)
+        fld = qd.field(dtype=qd.f32, shape=m)
+
+        @qd.kernel
+        def kern(s: qd.f32):
+            for j in range(m):
+                fld[j] = s * j
+
+        kern(1.0 + (i % 5))
+        _ = fld.to_numpy()  # force submit + sync
+        qd.reset()
+        if i % 25 == 0:
+            line = "cycle=%d max_rss_kb=%d" % (i, _rss_kb())
+            print("SAT", line, flush=True)
+            with open(RSSLOG, "a") as fh:
+                fh.write(line + "\n")
+    print("SATURATE_NO_REPRO completed %d cycles final_max_rss_kb=%d" % (N, _rss_kb()), flush=True)
+except Exception as e:
+    print("SATURATE_FIX1_THREW cycle=%d type=%s msg=%s" % (i, type(e).__name__, str(e)[:200]), flush=True)
+    with open(RSSLOG, "a") as fh:
+        fh.write("THREW cycle=%d %s: %s\n" % (i, type(e).__name__, str(e)[:200]))
+    raise
 PY
-run_stage probe_f64_basic python "${PROBE}"
+run_stage saturate_probe timeout 1200 env SAT_RSSLOG="${CRASH_OUT}/sat_rss.txt" SAT_CYCLES=6000 python "${SATPROBE}"
 
-# --- Stage 2: the exact crashing case, in isolation, vulkan-only serial ----------------
-# Establishes the baseline: with a vulkan-only run the _skip_if_f64_unsupported guard
-# fires and this SKIPS (no crash). (Confirmed: 1 skipped.)
-run_stage isolate_f64_mul_vulkan_only \
-  python tests/run_tests.py test_simt -k "test_subgroup_inclusive_mul_tiled and dtype3" --arch vulkan -t 1 -v -s
+# --- Stage B (the production FIX): full serial vulkan suite WITH proactive worker recycle ----
+# QD_WORKER_RECYCLE_EVERY makes run_tests.py force a single xdist worker even at -t 1, and conftest
+# recycles it every N completed tests, bounding accumulation. Even on a bad VM this should stay fast
+# and reach 100% (rc=0). This is the change that gets the vulkan leg to >=99%.
+run_stage recycle_full \
+  timeout 4200 env QD_WORKER_RECYCLE_EVERY=25 \
+  python tests/run_tests.py -v -r 1 --arch vulkan -m "not needs_torch" -t 1
 
-# --- Stage 3: neuter the skip guard, run f64 mul_tiled vulkan-only ---------------------
-# Decisive: does the f64 vulkan subgroup prefix-product kernel ABORT the driver by itself
-# (real backend bug, guard is load-bearing), or raise a clean "Type f64 not supported"
-# RuntimeError (=> the CI abort needs accumulation / some other trigger)?
-cp tests/python/test_simt.py "${RUNNER_TEMP}/test_simt.orig.py"
-perl -0pi -e 's/(def _skip_if_f64_unsupported\(dtype\):\n)/$1    return  # DIAG: neutered to test the raw f64 vulkan subgroup path\n/' tests/python/test_simt.py
-grep -n -A2 "def _skip_if_f64_unsupported" tests/python/test_simt.py | head
-run_stage f64_mul_noskip \
-  python tests/run_tests.py test_simt -k "test_subgroup_inclusive_mul_tiled and dtype3" --arch vulkan -t 1 -v -s
-cp "${RUNNER_TEMP}/test_simt.orig.py" tests/python/test_simt.py   # restore
-
-# --- Stage 4a: vulkan-only test_simt.py, serial ---------------------------------------
-# The failing production leg is VULKAN-ONLY (MAC_TEST_ARCH=vulkan) with a single serial
-# worker; it aborts at ~63% in test_subgroup_inclusive_mul_tiled[f64] even though that
-# same test SKIPS in isolation (stage 2). Try to reproduce with just test_simt.py first.
-run_stage repro_test_simt_vulkan \
-  python tests/run_tests.py test_simt --arch vulkan -t 1 -v
-
-# --- Stage 4b: full vulkan-only "not needs_torch" repro (only if 4a did not crash) -----
-# The exact failing-leg command. Bounded: the production legs aborted ~18 min in.
-if ls "${CRASH_OUT}"/repro_test_simt_vulkan__* >/dev/null 2>&1; then
-  echo "test_simt-only already reproduced the crash; skipping full vulkan repro"
-  echo "STAGE_RESULT repro_full_vulkan skipped" >> "${STAGE_RESULTS}"
-else
-  run_stage repro_full_vulkan \
-    python tests/run_tests.py -v -r 1 --arch vulkan -m "not needs_torch" -t 1
-fi
-
-# --- Stage 5: FIX VALIDATION - same serial vulkan command, but with proactive worker recycle --
-# Stage 4b (no recycle, -t 1, no xdist worker) hard-aborts ~63% in GfxRuntime::flush()'s
-# QD_ASSERT once MoltenVK/VulkanStream state accumulates. QD_WORKER_RECYCLE_EVERY makes
-# run_tests.py force a single xdist worker even at -t 1, and conftest recycles that worker every
-# N completed tests, bounding the accumulation. Expected: rc=0 (reaches 100%) instead of rc=134.
-run_stage repro_full_vulkan_recycle \
-  env QD_WORKER_RECYCLE_EVERY=25 \
+# --- Stage C (authentic fix(1) + leak curve, slow, LAST): full serial vulkan, NO recycle -----
+# The exact failing-leg command. Pre-fix this hard-aborts (rc=134,.ips) ~63% in. With fix(1) it must
+# instead raise a catchable RuntimeError (rc!=134, no .ips) and keep going. Also produces the full
+# RSS-vs-test curve for investigation (2). Bounded by timeout so artifacts always upload.
+run_stage norecycle_full \
+  timeout 4200 \
   python tests/run_tests.py -v -r 1 --arch vulkan -m "not needs_torch" -t 1
 
 # --- job summary -----------------------------------------------------------------------
 {
-  echo "## Vulkan SIMT crash: fix(1) validation + accumulation probe"
+  echo "## Vulkan SIMT crash: fix(1) validation + accumulation/leak probe"
   echo ""
-  echo "fix(1): VulkanStream::submit() now throws QuadrantsRuntimeError on vkQueueSubmit failure"
-  echo "instead of RHI_ASSERT->assert->abort(). Expect Stage 4b (repro_full_vulkan, no recycle)"
-  echo "to change from rc=134 (Abort trap: 6) to a recoverable rc!=134, and repro_full_vulkan_recycle"
-  echo "(fix(1)+worker recycle) to reach 100% (rc=0)."
+  echo "fix(1): VulkanStream::submit() throws QuadrantsRuntimeError on vkQueueSubmit failure instead of"
+  echo "RHI_ASSERT->assert->abort(). PASS = no .ips anywhere; saturate_probe/norecycle_full show a"
+  echo "RuntimeError (rc=1) instead of Abort trap:6 (rc=134); recycle_full reaches 100% (rc=0)."
   echo ""
   echo '```'
   cat "${STAGE_RESULTS}"
+  echo '```'
+  echo ""
+  echo "### Stage A saturate_probe: RSS per init/reset+submit cycle (leak vs plateau) + fix(1) outcome"
+  echo '```'
+  if [ -s "${CRASH_OUT}/sat_rss.txt" ]; then
+    awk 'NR==1 || NR%10==0' "${CRASH_OUT}/sat_rss.txt"
+    echo "-- last 5 --"; tail -n 5 "${CRASH_OUT}/sat_rss.txt"
+  else
+    echo "(no sat_rss)"
+  fi
   echo '```'
   echo ""
   echo "### Phase log tail (final line = test+phase where the run stopped)"
@@ -306,7 +312,7 @@ run_stage repro_full_vulkan_recycle \
   tail -n 30 "${PHASELOG}" 2>/dev/null || echo "(no phaselog)"
   echo '```'
   echo ""
-  echo "### Investigation (2): RSS vs test index (leak-like growth vs flat)"
+  echo "### Investigation (2): full-suite RSS vs test index (norecycle_full)"
   echo '```'
   if [ -s "${RSSLOG}" ]; then
     total=$(wc -l < "${RSSLOG}")

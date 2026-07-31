@@ -52,6 +52,13 @@ jobs:
       - name: Mac OS X build (from this branch, includes fix(1))
         run: |
           bash .github/workflows/scripts_new/macosx/2_build.sh
+      - name: Upload built wheel (so re-runs can skip the ~16m rebuild)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fix1_mac_wheel_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}
+          path: dist
+          if-no-files-found: warn
       - name: Mac OS X install
         run: |
           bash .github/workflows/scripts_new/macosx/3_install.sh
