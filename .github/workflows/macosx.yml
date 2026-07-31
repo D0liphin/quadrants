@@ -19,25 +19,19 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 jobs:
-  # [DONOTMERGE] diagnostic branch validating fix(1) for the vulkan-leg SIGABRT.
-  # Root cause (production .ips): VulkanStream::submit()'s vkQueueSubmit fails once process-wide
-  # MoltenVK/Metal state accumulates across the suite, and BAIL_ON_VK_BAD_RESULT_NO_RETURN routed
-  # that to RHI_ASSERT -> assert() -> abort() (hard crash, no traceback) inside a qd.reset()
-  # teardown flush. fix(1) makes submit() throw QuadrantsRuntimeError instead. This job BUILDS
-  # quadrants FROM THIS BRANCH (so the C++ change is included) and runs the serial (-t 1) vulkan
-  # suite that reliably aborted: expect abort->recoverable exception (Stage 4b, no more .ips) and
-  # fix(1)+worker-recycle to reach 100% (Stage 5). Also logs RSS per test (investigation 2).
-  vulkan_simt_crash:
-    name: Vulkan SIMT crash repro
+  # [DONOTMERGE] leak-localization for the vulkan/MoltenVK per-init/reset leak (~50 KB/cycle) that
+  # ends in VK_ERROR_DEVICE_LOST. Reuses the fix(1) wheel already built by run 30659629369 (C++ is
+  # unchanged; only shell scripts changed since) so there is NO 16-min rebuild -- just download +
+  # pip install + run three RSS-vs-cycle probes (bare init/reset / +field / +kernel) in ~15 min.
+  vulkan_leak_probe:
+    name: Vulkan leak localization
     strategy:
       fail-fast: false
       matrix:
         MAC_OS_VERSION: [26]
         PYTHON_VERSION: ['3.12']
     runs-on: macos-${{ matrix.MAC_OS_VERSION }}
-    # Stages are individually `timeout`-bounded; keep the job ceiling comfortably above their sum
-    # (build + probe + recycle + norecycle) so the always() artifact upload is never skipped.
-    timeout-minutes: 240
+    timeout-minutes: 45
     permissions:
       contents: read
       actions: read
@@ -48,22 +42,18 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.PYTHON_VERSION }}
-      - name: Mac OS X prerequisites
-        run: |
-          bash .github/workflows/scripts_new/macosx/1_prerequisites.sh
-      - name: Mac OS X build (from this branch, includes fix(1))
-        run: |
-          bash .github/workflows/scripts_new/macosx/2_build.sh
-      - name: Upload built wheel (so re-runs can skip the ~16m rebuild)
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Download prebuilt fix(1) wheel (skip rebuild; C++ unchanged since run 30659629369)
+        uses: actions/download-artifact@v4
         with:
           name: fix1_mac_wheel_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}
+          run-id: 30659629369
+          github-token: ${{ github.token }}
           path: dist
-          if-no-files-found: warn
-      - name: Mac OS X install
+      - name: Install wheel
         run: |
-          bash .github/workflows/scripts_new/macosx/3_install.sh
+          pip install -U pip
+          pip install dist/*.whl
+          python -c "import quadrants as qd; print('quadrants', getattr(qd,'__version__','?'))"
       - name: Interactive tmate session (dispatch-gated)
         if: ${{ github.event.inputs.debug_tmate == 'true' }}
         env:
@@ -72,16 +62,14 @@ jobs:
           PR_NUMBER: "830"
         run: |
           bash .github/workflows/scripts_new/macosx/tmate_debug.sh
-      - name: Vulkan SIMT crash diagnostics
+      - name: Vulkan leak-localization probe
         if: ${{ github.event.inputs.debug_tmate != 'true' }}
         run: |
-          bash .github/workflows/scripts_new/macosx/vulkan_simt_crash.sh
-      - name: Upload crash reports + stage results
+          bash .github/workflows/scripts_new/macosx/leak_probe.sh
+      - name: Upload leak probe RSS logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vulkan_simt_crash_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}
-          path: |
-            ${{ runner.temp }}/crash_reports
-            ${{ runner.temp }}/stage_results.txt
+          name: vulkan_leak_probe_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}
+          path: ${{ runner.temp }}/leak_out
           if-no-files-found: warn
