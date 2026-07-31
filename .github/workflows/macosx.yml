@@ -103,6 +103,11 @@ jobs:
       - name: Mac OS X test
         env:
           MAC_TEST_ARCH: ${{ matrix.ARCH }}
+          # Vulkan (MoltenVK) GPU-context teardown collapses when 3 xdist workers share the
+          # 3-core runner (86-222 min, teardown-bound); dropping the vulkan leg to 2 workers
+          # leaves a core free and keeps teardown fast (~20 min, call-bound). cpu/metal are
+          # unaffected, so they keep the default worker count (empty => run_tests.py default).
+          QD_TEST_THREADS: ${{ matrix.ARCH == 'vulkan' && '2' || '' }}
         run: |
           bash .github/workflows/scripts_new/macosx/4_test.sh
   publish_pypi:
