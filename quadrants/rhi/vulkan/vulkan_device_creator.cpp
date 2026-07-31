@@ -258,9 +258,16 @@ VulkanDeviceCreator::~VulkanDeviceCreator() {
     destroy_debug_utils_messenger_ext(instance_, debug_messenger_, kNoVkAllocCallbacks);
   }
   vkDestroyDevice(device_, kNoVkAllocCallbacks);
-  // VkInstance is intentionally kept alive in VulkanLoader (process-lifetime).
-  // Repeated vkDestroyInstance/vkCreateInstance triggers an NVIDIA driver bug
-  // that corrupts SubgroupLocalInvocationId after ~11 cycles.
+  // The VkInstance is process-immortal ONLY where the NVIDIA driver bug requires it (keep_instance_alive
+  // is set from the physical device's vendorID). Repeated vkDestroyInstance/vkCreateInstance corrupts
+  // SubgroupLocalInvocationId on NVIDIA after ~11 cycles, so there we keep it alive. Everywhere else --
+  // notably MoltenVK -- we destroy it each cycle: reusing one VkInstance/MTLDevice across thousands of
+  // per-cycle VkDevice create/destroy cycles leaks Metal state until vkQueueSubmit returns
+  // VK_ERROR_DEVICE_LOST (~2900 cycles). Tearing it down here lets the next qd.init() start clean.
+  if (!VulkanLoader::instance().keep_instance_alive()) {
+    vkDestroyInstance(instance_, kNoVkAllocCallbacks);
+    VulkanLoader::instance().clear_instance();
+  }
 }
 
 // Create (or reuse) a VkInstance and populate qd_device_ capability flags.
@@ -509,6 +516,15 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   // Get device properties
   VkPhysicalDeviceProperties physical_device_properties{};
   vkGetPhysicalDeviceProperties(physical_device_, &physical_device_properties);
+
+  // Decide whether to keep the VkInstance alive for the whole process (see
+  // VulkanLoader::keep_instance_alive). The immortal-instance workaround is only needed for an NVIDIA
+  // driver bug; scope it to NVIDIA (and to UI, whose swapchain/surface is bound to the instance).
+  // Everywhere else -- MoltenVK in particular -- the instance is torn down and recreated per cycle so
+  // MoltenVK's per-VkDevice Metal state cannot accumulate on the shared MTLDevice.
+  constexpr uint32_t kNvidiaVendorId = 0x10DE;
+  VulkanLoader::instance().set_keep_instance_alive(physical_device_properties.vendorID == kNvidiaVendorId ||
+                                                   params_.is_for_ui);
 
   {
     char msg_buf[256];

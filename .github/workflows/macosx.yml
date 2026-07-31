@@ -19,10 +19,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 jobs:
-  # [DONOTMERGE] leak-localization for the vulkan/MoltenVK per-init/reset leak (~50 KB/cycle) that
-  # ends in VK_ERROR_DEVICE_LOST. Reuses the fix(1) wheel already built by run 30659629369 (C++ is
-  # unchanged; only shell scripts changed since) so there is NO 16-min rebuild -- just download +
-  # pip install + run three RSS-vs-cycle probes (bare init/reset / +field / +kernel) in ~15 min.
+  # [DONOTMERGE] validate the vendor-scoped VkInstance fix: the immortal-VkInstance workaround is now
+  # scoped to NVIDIA (its actual driver bug); on MoltenVK the instance is destroyed+recreated per
+  # qd.init()/qd.reset() cycle so per-VkDevice Metal state can't accumulate on the shared MTLDevice.
+  # This job BUILDS from this branch (C++ changed) and runs the leak-localization probes: pre-fix all
+  # three (bare/field/kernel) hard-abort at ~2900 cycles; if the fix works they should run PAST 2900
+  # (to the cycle cap or the per-stage timeout) with NO rc=134 / no .ips.
   vulkan_leak_probe:
     name: Vulkan leak localization
     strategy:
@@ -31,7 +33,7 @@ jobs:
         MAC_OS_VERSION: [26]
         PYTHON_VERSION: ['3.12']
     runs-on: macos-${{ matrix.MAC_OS_VERSION }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     permissions:
       contents: read
       actions: read
@@ -42,18 +44,22 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.PYTHON_VERSION }}
-      - name: Download prebuilt fix(1) wheel (skip rebuild; C++ unchanged since run 30659629369)
-        uses: actions/download-artifact@v4
-        with:
-          name: fix1_mac_wheel_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}
-          run-id: 30659629369
-          github-token: ${{ github.token }}
-          path: dist
-      - name: Install wheel
+      - name: Mac OS X prerequisites
         run: |
-          pip install -U pip
-          pip install dist/*.whl
-          python -c "import quadrants as qd; print('quadrants', getattr(qd,'__version__','?'))"
+          bash .github/workflows/scripts_new/macosx/1_prerequisites.sh
+      - name: Mac OS X build (from this branch, includes vendor-scoped VkInstance fix)
+        run: |
+          bash .github/workflows/scripts_new/macosx/2_build.sh
+      - name: Upload built wheel (so re-runs can skip the ~16m rebuild)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: instancefix_mac_wheel_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}
+          path: dist
+          if-no-files-found: warn
+      - name: Mac OS X install
+        run: |
+          bash .github/workflows/scripts_new/macosx/3_install.sh
       - name: Interactive tmate session (dispatch-gated)
         if: ${{ github.event.inputs.debug_tmate == 'true' }}
         env:

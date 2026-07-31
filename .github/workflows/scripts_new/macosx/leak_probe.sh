@@ -79,9 +79,11 @@ run_probe() {  # run_probe NAME MODE SECS CYCLES
   echo "############### PROBE ${name} END rc=$? $(date -u +%H:%M:%SZ) ###############"
 }
 
-run_probe bare   bare   360 4000
-run_probe field  field  360 4000
-run_probe kernel kernel 480 4000
+# Cycle target well above the old ~2900 device-lost cap; per-stage timeouts give headroom for the
+# (now costlier) per-cycle instance recreate. PASS if a probe runs past ~2900 with NO rc=134 abort.
+run_probe bare   bare   700 5000
+run_probe field  field  700 5000
+run_probe kernel kernel 800 5000
 
 # --- summary: per-cycle slope for each layer --------------------------------------------
 {
