@@ -7,21 +7,58 @@ on:
       - synchronize
   workflow_dispatch:
     inputs:
-      quadrants_version:
-        description: "quadrants version to pip install from PyPI (blank = latest --pre)."
+      debug_tmate:
+        description: "Open an interactive tmate session on the runner (instead of the auto repro)."
         required: false
-        default: ""
+        default: "false"
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 jobs:
-  # [DONOTMERGE] diagnostic branch (based on main so the PR is conflict-free and CI runs).
-  # Digs into the vulkan SIMT subgroup SIGABRT
-  # (test_subgroup_inclusive_mul_tiled[arch=vulkan, dtype=f64] -> Abort trap: 6) that a
-  # single serial xdist worker exposes. Installs a prebuilt wheel from PyPI (no build) and
-  # runs targeted vulkan-only repros with lldb + macOS .ips crash-report capture. All other
-  # (non-mac) workflows are intentionally removed on this branch.
+  # [DONOTMERGE] diagnostic branch (based on main so the build + wheel match the leg that
+  # actually crashes). Builds quadrants from source, then reproduces the vulkan SIMT f64
+  # subgroup SIGABRT (test_subgroup_inclusive_mul_tiled[arch=vulkan, dtype=f64] ->
+  # Abort trap: 6) that a single serial worker exposes, capturing the faulting backtrace
+  # from macOS .ips crash reports. Set debug_tmate=true (workflow_dispatch) to instead open
+  # an interactive tmate session on the built runner. All non-mac workflows are removed here.
+  build_mac:
+    strategy:
+      fail-fast: false
+      matrix:
+        MAC_OS_VERSION: [26]
+        PYTHON_VERSION: ['3.12']
+    name: Mac OS Build
+    runs-on: macos-${{ matrix.MAC_OS_VERSION }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Python check
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.PYTHON_VERSION }}
+      - name: Set Python CP version
+        id: set_cp_version
+        run: |
+          pip install packaging
+          cp=$(python -c "from packaging import tags; print(next(tags.sys_tags()).interpreter)")
+          echo "PYTHON_CP_VERSION=${cp}" >> $GITHUB_OUTPUT
+      - name: Mac OS X prerequisites
+        run: |
+          bash .github/workflows/scripts_new/macosx/1_prerequisites.sh
+      - name: Mac OS X build
+        run: |
+          bash .github/workflows/scripts_new/macosx/2_build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac_wheel_${{ matrix.MAC_OS_VERSION }}_${{ steps.set_cp_version.outputs.PYTHON_CP_VERSION }}
+          path: dist/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac_cpptests_${{ matrix.MAC_OS_VERSION }}_${{ steps.set_cp_version.outputs.PYTHON_CP_VERSION }}
+          path: build/quadrants_cpp_tests
   vulkan_simt_crash:
+    needs: build_mac
     name: Vulkan SIMT crash repro
     strategy:
       fail-fast: false
@@ -29,25 +66,43 @@ jobs:
         MAC_OS_VERSION: [26]
         PYTHON_VERSION: ['3.12']
     runs-on: macos-${{ matrix.MAC_OS_VERSION }}
-    timeout-minutes: 60
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
       - name: Python check
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.PYTHON_VERSION }}
-      - name: Install prebuilt quadrants wheel from PyPI
-        env:
-          QD_VERSION: ${{ github.event.inputs.quadrants_version }}
+      - name: Set Python CP version
+        id: set_cp_version
         run: |
-          set -ex
-          if [ -n "${QD_VERSION}" ]; then
-            pip install --prefer-binary "quadrants==${QD_VERSION}"
-          else
-            pip install --prefer-binary --pre --upgrade quadrants
-          fi
-          python -c "import quadrants as qd; qd.init(arch=qd.vulkan)"
+          pip install packaging
+          cp=$(python -c "from packaging import tags; print(next(tags.sys_tags()).interpreter)")
+          echo "PYTHON_CP_VERSION=${cp}" >> $GITHUB_OUTPUT
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac_wheel_${{ matrix.MAC_OS_VERSION }}_${{ steps.set_cp_version.outputs.PYTHON_CP_VERSION }}
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac_cpptests_${{ matrix.MAC_OS_VERSION }}_${{ steps.set_cp_version.outputs.PYTHON_CP_VERSION }}
+          path: build
+      - name: Install built wheel
+        run: |
+          bash .github/workflows/scripts_new/macosx/3_install.sh
+      - name: Interactive tmate session (dispatch-gated)
+        if: ${{ github.event.inputs.debug_tmate == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: "830"
+        run: |
+          bash .github/workflows/scripts_new/macosx/tmate_debug.sh
       - name: Vulkan SIMT crash diagnostics
+        if: ${{ github.event.inputs.debug_tmate != 'true' }}
         run: |
           bash .github/workflows/scripts_new/macosx/vulkan_simt_crash.sh
       - name: Upload crash reports + stage results

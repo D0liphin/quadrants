@@ -105,8 +105,14 @@ run_stage() {
 
 pip install --prefer-binary --group test
 export QD_LIB_DIR="$(python -c 'import quadrants as qd; print(qd.__path__[0])' | tail -n 1)/_lib/runtime"
-PYBIN="$(command -v python)"   # lldb needs the absolute exe path, not "python"
-echo "python=$(python -V 2>&1) pybin=${PYBIN} quadrants=$(python -c 'import quadrants as qd; print(getattr(qd,"__version__","?"))' 2>&1)"
+echo "python=$(python -V 2>&1) quadrants=$(python -c 'import quadrants as qd; print(getattr(qd,"__version__","?"))' 2>&1)"
+
+# NB: we run each repro DIRECTLY (not under lldb). lldb --batch on these macOS runners
+# stops at the initial exec and quits without ever running the program (stop reason=exec),
+# so it produced no data. Instead we let the process abort naturally; macOS ReportCrash
+# writes an .ips crash report (with the faulting-thread backtrace) that collect_and_dump
+# parses. This wheel is BUILT FROM main (the published 1.2.0 gives a clean "Type f64 not
+# supported" error and does not reproduce the abort).
 
 # --- Stage 1: does plain (non-subgroup) f64 field I/O abort on vulkan? -----------------
 # Tests the broad claim in the skip message ("MoltenVK does not support f64"). If this
@@ -135,36 +141,32 @@ run_stage probe_f64_basic python "${PROBE}"
 run_stage isolate_f64_mul_vulkan_only \
   python tests/run_tests.py test_simt -k "test_subgroup_inclusive_mul_tiled and dtype3" --arch vulkan -t 1 -v -s
 
-# --- Stage 3: neuter the skip guard, run f64 mul_tiled vulkan-only, under lldb ----------
+# --- Stage 3: neuter the skip guard, run f64 mul_tiled vulkan-only ---------------------
 # Decisive: does the f64 vulkan subgroup prefix-product kernel ABORT the driver by itself
-# (real backend bug, guard is load-bearing), or raise the same clean "Type f64 not
-# supported" RuntimeError we saw in stage 1 (=> the CI abort is a wrong-arch/leak effect)?
+# (real backend bug, guard is load-bearing), or raise a clean "Type f64 not supported"
+# RuntimeError (=> the CI abort needs accumulation / some other trigger)?
 cp tests/python/test_simt.py "${RUNNER_TEMP}/test_simt.orig.py"
 perl -0pi -e 's/(def _skip_if_f64_unsupported\(dtype\):\n)/$1    return  # DIAG: neutered to test the raw f64 vulkan subgroup path\n/' tests/python/test_simt.py
 grep -n -A2 "def _skip_if_f64_unsupported" tests/python/test_simt.py | head
-run_stage f64_mul_noskip_lldb \
-  lldb --batch -o "run" -k "thread backtrace all" -k "quit" -- \
-  "${PYBIN}" tests/run_tests.py test_simt -k "test_subgroup_inclusive_mul_tiled and dtype3" --arch vulkan -t 1 -v
+run_stage f64_mul_noskip \
+  python tests/run_tests.py test_simt -k "test_subgroup_inclusive_mul_tiled and dtype3" --arch vulkan -t 1 -v -s
 cp "${RUNNER_TEMP}/test_simt.orig.py" tests/python/test_simt.py   # restore
 
-# --- Stage 4a: vulkan-only test_simt.py, serial, under lldb ----------------------------
+# --- Stage 4a: vulkan-only test_simt.py, serial ---------------------------------------
 # The failing production leg is VULKAN-ONLY (MAC_TEST_ARCH=vulkan) with a single serial
 # worker; it aborts at ~63% in test_subgroup_inclusive_mul_tiled[f64] even though that
-# same test SKIPS in isolation (stage 2). So the skip guard misses only after the vulkan
-# suite accumulates. Try to reproduce with just test_simt.py first (fast).
-run_stage repro_test_simt_vulkan_lldb \
-  lldb --batch -o "run" -k "thread backtrace all" -k "quit" -- \
-  "${PYBIN}" tests/run_tests.py test_simt --arch vulkan -t 1 -v
+# same test SKIPS in isolation (stage 2). Try to reproduce with just test_simt.py first.
+run_stage repro_test_simt_vulkan \
+  python tests/run_tests.py test_simt --arch vulkan -t 1 -v
 
 # --- Stage 4b: full vulkan-only "not needs_torch" repro (only if 4a did not crash) -----
 # The exact failing-leg command. Bounded: the production legs aborted ~18 min in.
-if ls "${CRASH_OUT}"/repro_test_simt_vulkan_lldb__* >/dev/null 2>&1; then
+if ls "${CRASH_OUT}"/repro_test_simt_vulkan__* >/dev/null 2>&1; then
   echo "test_simt-only already reproduced the crash; skipping full vulkan repro"
   echo "STAGE_RESULT repro_full_vulkan skipped" >> "${STAGE_RESULTS}"
 else
-  run_stage repro_full_vulkan_lldb \
-    lldb --batch -o "run" -k "thread backtrace all" -k "quit" -- \
-    "${PYBIN}" tests/run_tests.py -v -r 1 --arch vulkan -m "not needs_torch" -t 1
+  run_stage repro_full_vulkan \
+    python tests/run_tests.py -v -r 1 --arch vulkan -m "not needs_torch" -t 1
 fi
 
 # --- job summary -----------------------------------------------------------------------
