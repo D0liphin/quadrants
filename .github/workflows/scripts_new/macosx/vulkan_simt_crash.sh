@@ -31,10 +31,14 @@ mkdir -p "${DR_USER}"
 rm -f "${DR_USER}"/*.ips "${DR_USER}"/*.crash 2>/dev/null || true
 sudo -n rm -f "${DR_SYS}"/*.ips "${DR_SYS}"/*.crash 2>/dev/null || true
 
-# Give MoltenVK / Metal a chance to log what it was doing right before it aborts.
+# Give MoltenVK a chance to log what it was doing right before it aborts.
 # Level 1 = errors only (level 3 dumps ~126 supported extensions as noise on every init).
 export MVK_CONFIG_LOG_LEVEL=1
-export MTL_DEBUG_LAYER=1
+# NB: do NOT set MTL_DEBUG_LAYER here. Production (4_test.sh / run_tests.py) does not enable
+# Metal API Validation, and enabling it CHANGES the failure: the validation layer turns UB
+# (e.g. a zero-grid dispatchThreadgroups from test_zero_outer_loop) into an immediate
+# __assert_rtn/abort, so the crash lands at a different test/point than the real leg. We want
+# the production abort, so leave the debug layer off and capture whatever MoltenVK does.
 
 # .ips crash reports are JSON (header line + body doc). Extract the exception, the
 # termination reason and the faulting thread's frames (with image names).
