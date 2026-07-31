@@ -35,7 +35,9 @@ jobs:
         MAC_OS_VERSION: [26]
         PYTHON_VERSION: ['3.12']
     runs-on: macos-${{ matrix.MAC_OS_VERSION }}
-    timeout-minutes: 150
+    # Stages are individually `timeout`-bounded; keep the job ceiling comfortably above their sum
+    # (build + probe + recycle + norecycle) so the always() artifact upload is never skipped.
+    timeout-minutes: 240
     permissions:
       contents: read
       actions: read
