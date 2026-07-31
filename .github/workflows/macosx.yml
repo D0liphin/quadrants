@@ -103,12 +103,14 @@ jobs:
       - name: Mac OS X test
         env:
           MAC_TEST_ARCH: ${{ matrix.ARCH }}
-          # Vulkan (MoltenVK) GPU-context teardown collapses when multiple xdist workers share
-          # the 3-core runner (86-222 min, teardown-bound). 2 workers helped (~27-42 min) but
-          # still starved the runner on ~1/6 legs; run the vulkan leg serially (1 worker) so
-          # GPU-context teardowns never overlap - clean and comparable wall time (~34 min).
+          # Vulkan (MoltenVK) GPU-context teardown collapses when all 3 xdist workers share the
+          # 3-core runner (86-222 min, teardown-bound); 2 workers keeps it fast (~27-42 min).
+          # NB: do NOT drop to 1 worker - test_simt.py::test_subgroup_inclusive_mul_tiled
+          # [arch=vulkan] hard-aborts the MoltenVK driver (Abort trap: 6) mid-run; with >=2
+          # workers xdist restarts the crashed worker and the session survives, but a single
+          # worker has no restart safety net and the whole leg dies at ~63%.
           # cpu/metal do not collapse, so they keep the default worker count (empty => default).
-          QD_TEST_THREADS: ${{ matrix.ARCH == 'vulkan' && '1' || '' }}
+          QD_TEST_THREADS: ${{ matrix.ARCH == 'vulkan' && '2' || '' }}
         run: |
           bash .github/workflows/scripts_new/macosx/4_test.sh
   publish_pypi:
