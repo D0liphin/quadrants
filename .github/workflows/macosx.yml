@@ -19,21 +19,19 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 jobs:
-  # [DONOTMERGE] validate the vendor-scoped VkInstance fix: the immortal-VkInstance workaround is now
-  # scoped to NVIDIA (its actual driver bug); on MoltenVK the instance is destroyed+recreated per
-  # qd.init()/qd.reset() cycle so per-VkDevice Metal state can't accumulate on the shared MTLDevice.
-  # This job BUILDS from this branch (C++ changed) and runs the leak-localization probes: pre-fix all
-  # three (bare/field/kernel) hard-abort at ~2900 cycles; if the fix works they should run PAST 2900
-  # (to the cycle cap or the per-stage timeout) with NO rc=134 / no .ips.
-  vulkan_leak_probe:
-    name: Vulkan leak localization
+  # [DONOTMERGE] capture the EXACT per-cycle Vulkan call sequence MoltenVK sees during qd.init()/
+  # qd.reset() (MVK_CONFIG_TRACE_VULKAN_CALLS), so a standalone no-Quadrants C++ repro can mirror it
+  # 1:1. Reuses the fix1 wheel from run 30659629369 (default immortal-instance behaviour; fix1 only
+  # changed submit error handling, not the success-path call sequence) -> NO rebuild, ~5 min.
+  vulkan_call_trace:
+    name: Vulkan call trace
     strategy:
       fail-fast: false
       matrix:
         MAC_OS_VERSION: [26]
         PYTHON_VERSION: ['3.12']
     runs-on: macos-${{ matrix.MAC_OS_VERSION }}
-    timeout-minutes: 90
+    timeout-minutes: 30
     permissions:
       contents: read
       actions: read
@@ -44,38 +42,25 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.PYTHON_VERSION }}
-      - name: Mac OS X prerequisites
-        run: |
-          bash .github/workflows/scripts_new/macosx/1_prerequisites.sh
-      - name: Mac OS X build (from this branch, includes vendor-scoped VkInstance fix)
-        run: |
-          bash .github/workflows/scripts_new/macosx/2_build.sh
-      - name: Upload built wheel (so re-runs can skip the ~16m rebuild)
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Download prebuilt fix(1) wheel (no rebuild)
+        uses: actions/download-artifact@v4
         with:
-          name: instancefix_mac_wheel_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}
+          name: fix1_mac_wheel_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}
+          run-id: 30659629369
+          github-token: ${{ github.token }}
           path: dist
-          if-no-files-found: warn
-      - name: Mac OS X install
+      - name: Install wheel
         run: |
-          bash .github/workflows/scripts_new/macosx/3_install.sh
-      - name: Interactive tmate session (dispatch-gated)
-        if: ${{ github.event.inputs.debug_tmate == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: "830"
+          pip install -U pip
+          pip install dist/*.whl
+          python -c "import quadrants as qd; print('quadrants', getattr(qd,'__version__','?'))"
+      - name: Trace Vulkan calls (3x qd.init/reset)
         run: |
-          bash .github/workflows/scripts_new/macosx/tmate_debug.sh
-      - name: Vulkan leak-localization probe
-        if: ${{ github.event.inputs.debug_tmate != 'true' }}
-        run: |
-          bash .github/workflows/scripts_new/macosx/leak_probe.sh
-      - name: Upload leak probe RSS logs
+          bash .github/workflows/scripts_new/macosx/trace_vk.sh
+      - name: Upload Vulkan call trace
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vulkan_leak_probe_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}
-          path: ${{ runner.temp }}/leak_out
+          name: vulkan_call_trace_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}
+          path: ${{ runner.temp }}/vktrace
           if-no-files-found: warn
