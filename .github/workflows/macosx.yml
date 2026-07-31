@@ -11,54 +11,22 @@ on:
         description: "Open an interactive tmate session on the runner (instead of the auto repro)."
         required: false
         default: "false"
+      wheel_run_id:
+        description: "Run id to download the prebuilt (built-from-main) mac wheel from."
+        required: false
+        default: "30635690618"
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 jobs:
-  # [DONOTMERGE] diagnostic branch (based on main so the build + wheel match the leg that
-  # actually crashes). Builds quadrants from source, then reproduces the vulkan SIMT f64
-  # subgroup SIGABRT (test_subgroup_inclusive_mul_tiled[arch=vulkan, dtype=f64] ->
-  # Abort trap: 6) that a single serial worker exposes, capturing the faulting backtrace
-  # from macOS .ips crash reports. Set debug_tmate=true (workflow_dispatch) to instead open
-  # an interactive tmate session on the built runner. All non-mac workflows are removed here.
-  build_mac:
-    strategy:
-      fail-fast: false
-      matrix:
-        MAC_OS_VERSION: [26]
-        PYTHON_VERSION: ['3.12']
-    name: Mac OS Build
-    runs-on: macos-${{ matrix.MAC_OS_VERSION }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Python check
-        uses: actions/setup-python@v4
-        with:
-          python-version: ${{ matrix.PYTHON_VERSION }}
-      - name: Set Python CP version
-        id: set_cp_version
-        run: |
-          pip install packaging
-          cp=$(python -c "from packaging import tags; print(next(tags.sys_tags()).interpreter)")
-          echo "PYTHON_CP_VERSION=${cp}" >> $GITHUB_OUTPUT
-      - name: Mac OS X prerequisites
-        run: |
-          bash .github/workflows/scripts_new/macosx/1_prerequisites.sh
-      - name: Mac OS X build
-        run: |
-          bash .github/workflows/scripts_new/macosx/2_build.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mac_wheel_${{ matrix.MAC_OS_VERSION }}_${{ steps.set_cp_version.outputs.PYTHON_CP_VERSION }}
-          path: dist/*.whl
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mac_cpptests_${{ matrix.MAC_OS_VERSION }}_${{ steps.set_cp_version.outputs.PYTHON_CP_VERSION }}
-          path: build/quadrants_cpp_tests
+  # [DONOTMERGE] diagnostic branch for the vulkan SIMT f64 subgroup SIGABRT
+  # (test_subgroup_inclusive_mul_tiled[arch=vulkan, dtype=f64] -> Abort trap: 6). Confirmed
+  # to reproduce ONLY on a wheel built from main (the published 1.2.0 raises a clean
+  # "Type f64 not supported" instead), and ONLY after the full vulkan suite accumulates
+  # (test_simt.py alone does not crash). To avoid a ~16-min rebuild every iteration this
+  # DOWNLOADS the prebuilt main wheel from a prior build run (wheel_run_id) instead of
+  # building. Set debug_tmate=true (workflow_dispatch) to open an interactive tmate session.
   vulkan_simt_crash:
-    needs: build_mac
     name: Vulkan SIMT crash repro
     strategy:
       fail-fast: false
@@ -69,6 +37,7 @@ jobs:
     timeout-minutes: 75
     permissions:
       contents: read
+      actions: read
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
@@ -76,21 +45,17 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.PYTHON_VERSION }}
-      - name: Set Python CP version
-        id: set_cp_version
+      - name: Download prebuilt main wheel from a prior build run
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          pip install packaging
-          cp=$(python -c "from packaging import tags; print(next(tags.sys_tags()).interpreter)")
-          echo "PYTHON_CP_VERSION=${cp}" >> $GITHUB_OUTPUT
-      - uses: actions/download-artifact@v4
-        with:
-          name: mac_wheel_${{ matrix.MAC_OS_VERSION }}_${{ steps.set_cp_version.outputs.PYTHON_CP_VERSION }}
-          path: dist
-      - uses: actions/download-artifact@v4
-        with:
-          name: mac_cpptests_${{ matrix.MAC_OS_VERSION }}_${{ steps.set_cp_version.outputs.PYTHON_CP_VERSION }}
-          path: build
-      - name: Install built wheel
+          set -ex
+          RID="${{ github.event.inputs.wheel_run_id }}"
+          RID="${RID:-30635690618}"
+          gh run download "$RID" --repo "${{ github.repository }}" -n mac_wheel_26_cp312 -D dist
+          gh run download "$RID" --repo "${{ github.repository }}" -n mac_cpptests_26_cp312 -D build || true
+          ls -la dist build 2>/dev/null || true
+      - name: Install prebuilt wheel
         run: |
           bash .github/workflows/scripts_new/macosx/3_install.sh
       - name: Interactive tmate session (dispatch-gated)

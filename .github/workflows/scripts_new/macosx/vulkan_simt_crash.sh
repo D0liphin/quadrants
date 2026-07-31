@@ -73,6 +73,10 @@ PY
 collect_and_dump_crashes() {
   local tag="$1"
   local found=0
+  # ReportCrash can lag under heavy post-abort system load; show what actually landed.
+  echo "--- DiagnosticReports contents (${tag}) ---"
+  ls -la "${DR_USER}" 2>/dev/null || true
+  sudo -n ls -la "${DR_SYS}" 2>/dev/null || ls -la "${DR_SYS}" 2>/dev/null || true
   for d in "${DR_USER}" "${DR_SYS}"; do
     for f in "${d}"/*.ips "${d}"/*.crash; do
       [ -f "${f}" ] || continue
@@ -97,8 +101,8 @@ run_stage() {
   echo "############### STAGE ${label} START $(date -u +%H:%M:%SZ) ###############"
   ( "$@" ); local rc=$?
   echo "############### STAGE ${label} END rc=${rc} $(date -u +%H:%M:%SZ) ###############"
-  # SIGABRT surfaces as rc 134; give the crash reporter a moment to write the .ips.
-  sleep 5
+  # SIGABRT surfaces as rc 134; ReportCrash can take a while to flush the .ips under load.
+  sleep 25
   collect_and_dump_crashes "${label}"
   echo "STAGE_RESULT ${label} rc=${rc}" >> "${STAGE_RESULTS}"
 }
