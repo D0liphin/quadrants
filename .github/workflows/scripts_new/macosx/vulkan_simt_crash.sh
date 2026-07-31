@@ -32,9 +32,8 @@ rm -f "${DR_USER}"/*.ips "${DR_USER}"/*.crash 2>/dev/null || true
 sudo -n rm -f "${DR_SYS}"/*.ips "${DR_SYS}"/*.crash 2>/dev/null || true
 
 # Give MoltenVK / Metal a chance to log what it was doing right before it aborts.
-export MVK_CONFIG_LOG_LEVEL=3
-export MVK_DEBUG=1
-export MVK_CONFIG_DEBUG=1
+# Level 1 = errors only (level 3 dumps ~126 supported extensions as noise on every init).
+export MVK_CONFIG_LOG_LEVEL=1
 export MTL_DEBUG_LAYER=1
 
 # .ips crash reports are JSON (header line + body doc). Extract the exception, the
@@ -106,12 +105,13 @@ run_stage() {
 
 pip install --prefer-binary --group test
 export QD_LIB_DIR="$(python -c 'import quadrants as qd; print(qd.__path__[0])' | tail -n 1)/_lib/runtime"
-echo "python=$(python -V 2>&1) quadrants=$(python -c 'import quadrants as qd; print(getattr(qd,"__version__","?"))' 2>&1)"
+PYBIN="$(command -v python)"   # lldb needs the absolute exe path, not "python"
+echo "python=$(python -V 2>&1) pybin=${PYBIN} quadrants=$(python -c 'import quadrants as qd; print(getattr(qd,"__version__","?"))' 2>&1)"
 
 # --- Stage 1: does plain (non-subgroup) f64 field I/O abort on vulkan? -----------------
 # Tests the broad claim in the skip message ("MoltenVK does not support f64"). If this
-# aborts, f64 is fundamentally unusable on vulkan/Darwin; if it prints OK, only the
-# subgroup prefix-scan path is the problem.
+# aborts, f64 is fundamentally unusable on vulkan/Darwin; if it raises a clean Python
+# error, f64 fails gracefully and only some other path aborts.
 PROBE="${RUNNER_TEMP}/probe_f64.py"
 cat > "${PROBE}" <<'PY'
 import platform
@@ -129,28 +129,31 @@ print("PROBE f64 basic field I/O OK:", f.to_numpy())
 PY
 run_stage probe_f64_basic python "${PROBE}"
 
-# --- Stage 2: the exact crashing case, in isolation, fresh serial process --------------
-# If this SKIPS -> the guard works standalone and the crash needs prior-test accumulation
-# (or an arch-detection leak). If it ABORTS -> the f64 subgroup kernel itself crashes.
-run_stage isolate_f64_mul \
+# --- Stage 2: the exact crashing case, in isolation, vulkan-only serial ----------------
+# Establishes the baseline: with a vulkan-only run the _skip_if_f64_unsupported guard
+# fires and this SKIPS (no crash). (Confirmed: 1 skipped.)
+run_stage isolate_f64_mul_vulkan_only \
   python tests/run_tests.py test_simt -k "test_subgroup_inclusive_mul_tiled and dtype3" --arch vulkan -t 1 -v -s
 
-# --- Stage 3: all inclusive-scan tiled ops (add/mul/min/max), serial, under lldb -------
-# add/min/max also go through _check_inclusive_scan; confirm whether they skip f64 or
-# also abort. lldb prints the faulting backtrace directly into the job log.
-run_stage inclusive_scan_lldb \
+# --- Stage 3: neuter the skip guard, run f64 mul_tiled vulkan-only, under lldb ----------
+# Decisive: does the f64 vulkan subgroup prefix-product kernel ABORT the driver by itself
+# (real backend bug, guard is load-bearing), or raise the same clean "Type f64 not
+# supported" RuntimeError we saw in stage 1 (=> the CI abort is a wrong-arch/leak effect)?
+cp tests/python/test_simt.py "${RUNNER_TEMP}/test_simt.orig.py"
+perl -0pi -e 's/(def _skip_if_f64_unsupported\(dtype\):\n)/$1    return  # DIAG: neutered to test the raw f64 vulkan subgroup path\n/' tests/python/test_simt.py
+grep -n -A2 "def _skip_if_f64_unsupported" tests/python/test_simt.py | head
+run_stage f64_mul_noskip_lldb \
   lldb --batch -o "run" -k "thread backtrace all" -k "quit" -- \
-  python tests/run_tests.py test_simt -k "inclusive_add_tiled or inclusive_mul_tiled or inclusive_min_tiled or inclusive_max_tiled" --arch vulkan -t 1 -v
+  "${PYBIN}" tests/run_tests.py test_simt -k "test_subgroup_inclusive_mul_tiled and dtype3" --arch vulkan -t 1 -v
+cp "${RUNNER_TEMP}/test_simt.orig.py" tests/python/test_simt.py   # restore
 
-# --- Stage 4: full-suite serial repro under lldb (only if isolation didn't already crash)
-if ls "${CRASH_OUT}"/isolate_f64_mul__* "${CRASH_OUT}"/inclusive_scan_lldb__* >/dev/null 2>&1; then
-  echo "an earlier stage already reproduced the crash; skipping full-suite repro"
-  echo "STAGE_RESULT repro_simt_full skipped" >> "${STAGE_RESULTS}"
-else
-  run_stage repro_simt_full \
-    lldb --batch -o "run" -k "thread backtrace all" -k "quit" -- \
-    python tests/run_tests.py test_simt --arch vulkan -t 1 -v
-fi
+# --- Stage 4: faithful multi-arch serial repro of the CI crash, under lldb -------------
+# The failing CI leg ran `--arch metal,vulkan,cpu -m "not needs_torch"` with a single
+# serial worker and aborted at ~63%. Reproduce the exact command (bounded: it aborts
+# ~18 min in) so lldb captures the faulting thread's native backtrace.
+run_stage multiarch_full_repro_lldb \
+  lldb --batch -o "run" -k "thread backtrace all" -k "quit" -- \
+  "${PYBIN}" tests/run_tests.py -v -r 1 --arch metal,vulkan,cpu -m "not needs_torch" -t 1
 
 # --- job summary -----------------------------------------------------------------------
 {
