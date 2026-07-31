@@ -100,6 +100,26 @@ collect_and_dump_crashes() {
   [ "${found}" -eq 1 ] || echo "(no crash report produced for ${tag})"
 }
 
+# macOS runners ship NO GNU `timeout`/`gtimeout`, so bounding a stage with `timeout N ...` fails with
+# rc=127 (command not found) and the stage never runs. Portable shim: run "$@" in the background with a
+# watchdog that TERM/KILLs it after N seconds. Returns the command's rc (143 if the watchdog TERMs it).
+run_to() {
+  local secs="$1"; shift
+  "$@" &
+  local cmd_pid=$!
+  (
+    sleep "$secs"
+    kill -TERM "$cmd_pid" 2>/dev/null && { sleep 8; kill -KILL "$cmd_pid" 2>/dev/null; }
+  ) &
+  local wd_pid=$!
+  local rc=0
+  wait "$cmd_pid" 2>/dev/null || rc=$?
+  kill "$wd_pid" 2>/dev/null           # command finished on its own -> stop the watchdog...
+  pkill -P "$wd_pid" 2>/dev/null        # ...and its `sleep` child, so nothing lingers.
+  wait "$wd_pid" 2>/dev/null || true
+  return "$rc"
+}
+
 run_stage() {
   local label="$1"; shift
   echo "############### STAGE ${label} START $(date -u +%H:%M:%SZ) ###############"
@@ -267,14 +287,14 @@ except Exception as e:
         fh.write("THREW cycle=%d %s: %s\n" % (i, type(e).__name__, str(e)[:200]))
     raise
 PY
-run_stage saturate_probe timeout 1200 env SAT_RSSLOG="${CRASH_OUT}/sat_rss.txt" SAT_CYCLES=6000 python "${SATPROBE}"
+run_stage saturate_probe run_to 1200 env SAT_RSSLOG="${CRASH_OUT}/sat_rss.txt" SAT_CYCLES=6000 python "${SATPROBE}"
 
 # --- Stage B (the production FIX): full serial vulkan suite WITH proactive worker recycle ----
 # QD_WORKER_RECYCLE_EVERY makes run_tests.py force a single xdist worker even at -t 1, and conftest
 # recycles it every N completed tests, bounding accumulation. Even on a bad VM this should stay fast
 # and reach 100% (rc=0). This is the change that gets the vulkan leg to >=99%.
 run_stage recycle_full \
-  timeout 4200 env QD_WORKER_RECYCLE_EVERY=25 \
+  run_to 4200 env QD_WORKER_RECYCLE_EVERY=25 \
   python tests/run_tests.py -v -r 1 --arch vulkan -m "not needs_torch" -t 1
 
 # --- Stage C (authentic fix(1) + leak curve, slow, LAST): full serial vulkan, NO recycle -----
@@ -282,7 +302,7 @@ run_stage recycle_full \
 # instead raise a catchable RuntimeError (rc!=134, no .ips) and keep going. Also produces the full
 # RSS-vs-test curve for investigation (2). Bounded by timeout so artifacts always upload.
 run_stage norecycle_full \
-  timeout 4200 \
+  run_to 4200 \
   python tests/run_tests.py -v -r 1 --arch vulkan -m "not needs_torch" -t 1
 
 # --- job summary -----------------------------------------------------------------------
