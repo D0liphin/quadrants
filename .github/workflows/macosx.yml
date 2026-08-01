@@ -1,126 +1,56 @@
 name: Mac OS
 on:
   pull_request:
-    types:
-      - opened
-      - reopened
-      - synchronize
-  workflow_dispatch:
-  release:
-    types: [published]
+    types: [opened, reopened, synchronize]
+  workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'release' }}
+  cancel-in-progress: true
 jobs:
-  build_mac:
+  # [DONOTMERGE] Experiment: Darwin bypass_pooled_allocator for gtmp+listgen (plain vkAllocateMemory).
+  # Build one wheel, run bare qd.init(vulkan)/qd.reset() to 5000 cycles. Baseline hangs ~2900.
+  plain_gtmp_probe:
+    name: Plain gtmp/listgen bare probe
     strategy:
       fail-fast: false
       matrix:
         MAC_OS_VERSION: [26]
-        PYTHON_VERSION: ['3.10', '3.11', '3.12', '3.13']
-    name: Mac OS Build
+        PYTHON_VERSION: ['3.12']
     runs-on: macos-${{ matrix.MAC_OS_VERSION }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v4
         with:
-          # Need full history + tags so setuptools_scm derives the correct wheel version
-          # (otherwise it falls back to "0.1"). Matches linux.yml / manylinux_wheel.yml.
           fetch-depth: 0
       - name: Python check
         uses: actions/setup-python@v4
         with:
-          python-version: ${{ matrix.PYTHON_VERSION}}
-      - name: Set Python CP version
-        id: set_cp_version
-        run: |
-          pip install packaging
-          cp=$(python -c "from packaging import tags; print(next(tags.sys_tags()).interpreter)")
-          echo "PYTHON_CP_VERSION=${cp}"
-          echo "PYTHON_CP_VERSION=${cp}" >> $GITHUB_OUTPUT
+          python-version: ${{ matrix.PYTHON_VERSION }}
       - name: Mac OS X prerequisites
-        run: |
-          bash .github/workflows/scripts_new/macosx/1_prerequisites.sh
+        run: bash .github/workflows/scripts_new/macosx/1_prerequisites.sh
       - name: Mac OS X build
+        run: bash .github/workflows/scripts_new/macosx/2_build.sh
+      - name: Install wheel
         run: |
-          bash .github/workflows/scripts_new/macosx/2_build.sh
-      - uses: actions/upload-artifact@v4
+          pip install -U pip
+          pip install dist/*.whl
+          python -c "import quadrants as qd; print('quadrants', getattr(qd,'__version__','?'))"
+      - name: Bare init/reset probe (5000 cycles)
+        run: bash .github/workflows/scripts_new/macosx/plain_gtmp_probe.sh
+      - name: Upload probe log
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: mac_wheel_${{ matrix.MAC_OS_VERSION }}_${{ steps.set_cp_version.outputs.PYTHON_CP_VERSION }}
+          name: plain_gtmp_probe_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}
+          path: ${{ runner.temp }}/plain_gtmp_out
+          if-no-files-found: warn
+      - name: Upload wheel
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plain_gtmp_wheel_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_VERSION }}
           path: dist/*.whl
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mac_cpptests_${{ matrix.MAC_OS_VERSION }}_${{ steps.set_cp_version.outputs.PYTHON_CP_VERSION }}
-          path: build/quadrants_cpp_tests
-  test:
-    needs: build_mac
-    name: Test on Mac
-    # Split the previously-combined `--arch metal,vulkan,cpu` run into one job per backend
-    # (see MAC_TEST_ARCH in 4_test.sh). Each job then carries only ~1/3 of the suite, which
-    # keeps a single runner from being oversubscribed during test teardown - the cause of
-    # the recent Mac CI timeouts - and lets the three backends run in parallel. The build
-    # is unchanged (one wheel per Python version, shared by all three legs).
-    strategy:
-      fail-fast: false
-      matrix:
-        MAC_OS_VERSION: [26]
-        PYTHON_VERSION: ['3.10', '3.11', '3.12', '3.13']
-        ARCH: [metal, vulkan, cpu]
-        include:
-          - MAC_OS_VERSION: 15
-            PYTHON_VERSION: '3.10'
-            ARCH: metal
-          - MAC_OS_VERSION: 15
-            PYTHON_VERSION: '3.10'
-            ARCH: vulkan
-          - MAC_OS_VERSION: 15
-            PYTHON_VERSION: '3.10'
-            ARCH: cpu
-    runs-on: macos-${{ matrix.MAC_OS_VERSION }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Python check
-        uses: actions/setup-python@v4
-        with:
-          python-version: ${{ matrix.PYTHON_VERSION}}
-      - name: Set Python CP version
-        id: set_cp_version
-        run: |
-          pip install packaging
-          cp=$(python -c "from packaging import tags; print(next(tags.sys_tags()).interpreter)")
-          echo "PYTHON_CP_VERSION=${cp}"
-          echo "PYTHON_CP_VERSION=${cp}" >> $GITHUB_OUTPUT
-      - uses: actions/download-artifact@v4
-        with:
-          name: mac_wheel_26_${{ steps.set_cp_version.outputs.PYTHON_CP_VERSION }}
-          path: dist
-      - uses: actions/download-artifact@v4
-        with:
-          name: mac_cpptests_26_${{ steps.set_cp_version.outputs.PYTHON_CP_VERSION }}
-          path: build
-      - name: Mac OS X install
-        run: |
-          bash .github/workflows/scripts_new/macosx/3_install.sh
-      - name: Mac OS X test
-        env:
-          MAC_TEST_ARCH: ${{ matrix.ARCH }}
-        run: |
-          bash .github/workflows/scripts_new/macosx/4_test.sh
-  publish_pypi:
-    uses: ./.github/workflows/publish_pypi.yml
-    if: github.event_name == 'release'
-    needs: test
-    permissions:
-      id-token: write
-      contents: read
-    concurrency:
-      # group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-${{ matrix.PYTHON_CP_VERSION }}-${{ matrix.PYTHON_CP_VERSION != 'cp310' && 'all' || github.sha }}-test
-      group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-${{ matrix.PYTHON_CP_VERSION }}-test
-      cancel-in-progress: true
-    strategy:
-      matrix:
-        PYTHON_CP_VERSION: ["cp310", "cp311", "cp312", "cp313"]
-        MAC_OS_VERSION: [26]
-      fail-fast: false
-    with:
-      artifact_name: mac_wheel_${{ matrix.MAC_OS_VERSION }}_${{ matrix.PYTHON_CP_VERSION }}
-    secrets: inherit
+          if-no-files-found: warn

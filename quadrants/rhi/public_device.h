@@ -613,6 +613,10 @@ class RHI_DLL_EXPORT Device {
     bool host_read{false};
     bool export_sharing{false};
     AllocUsage usage{AllocUsage::Storage};
+    // When true, backends that use a pooled allocator (Vulkan/VMA) allocate a dedicated
+    // VkDeviceMemory via vkAllocateMemory instead. Used on Darwin for gtmp/listgen to avoid a
+    // MoltenVK hang triggered by VMA's pooled path for those two sizes (see Mac CI investigation).
+    bool bypass_pooled_allocator{false};
   };
 
   virtual RhiResult allocate_memory(const AllocParams &params, DeviceAllocation *out_devalloc) = 0;
