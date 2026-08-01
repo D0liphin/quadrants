@@ -13,6 +13,20 @@ export QD_FILE_TIMING_OUTPUT="${RUNNER_TEMP}/file_timing.md"
 # that overrides qd.init()'s arch via arch_from_name(), which aborts on the alias "cpu".
 MAC_TEST_ARCH="${MAC_TEST_ARCH:-metal,vulkan,cpu}"
 
+# The vulkan (MoltenVK) leg accumulates GPU/driver state across the suite: VulkanStream::submit keeps
+# every submitted command buffer + fence until a wait_idle and MoltenVK's per-VkDevice Metal state grows
+# with it, until GfxRuntime::flush() can no longer create a command list and its QD_ASSERT aborts the
+# process during a qd.reset() teardown (Abort trap: 6 around ~63% of the suite). A process restart is the
+# only reset for this process-global Metal state, so we run the vulkan leg as a SINGLE xdist worker
+# (QD_WORKER_RECYCLE_EVERY forces one even at -t 1) recycled every N completed tests, which bounds the
+# accumulation. Validated on macos-26: 2978 passed / 0 failed in ~36 min vs a hard abort without it. The
+# metal (native Metal) and cpu (LLVM) legs don't hit this, so they run unchanged.
+RECYCLE_ARGS=()
+if [ "${MAC_TEST_ARCH}" = "vulkan" ]; then
+  export QD_WORKER_RECYCLE_EVERY=25
+  RECYCLE_ARGS=(-t 1)
+fi
+
 pip install --prefer-binary --group test
 find . -name '*.bc'
 ls -lh build/
@@ -25,12 +39,12 @@ if [ "${MAC_TEST_ARCH}" = "cpu" ] || [ "${MAC_TEST_ARCH}" = "metal,vulkan,cpu" ]
 fi
 
 # Phase 1: run all tests except torch-dependent ones
-python tests/run_tests.py -v -r 1 --arch "${MAC_TEST_ARCH}" -m "not needs_torch"
+python tests/run_tests.py -v -r 1 --arch "${MAC_TEST_ARCH}" -m "not needs_torch" "${RECYCLE_ARGS[@]}"
 
 # Phase 2: install torch, run only torch tests
 # TODO: revert to stable torch after 2.9.2 release
 pip install --pre --upgrade torch --index-url https://download.pytorch.org/whl/nightly/cpu
-python tests/run_tests.py -v -r 1 --arch "${MAC_TEST_ARCH}" -m needs_torch
+python tests/run_tests.py -v -r 1 --arch "${MAC_TEST_ARCH}" -m needs_torch "${RECYCLE_ARGS[@]}"
 
 if [ -f "$QD_FILE_TIMING_OUTPUT" ]; then
   cat "$QD_FILE_TIMING_OUTPUT" >> "$GITHUB_STEP_SUMMARY"
