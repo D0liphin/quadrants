@@ -460,7 +460,7 @@
 <span class="n">backend</span> <span class="n">codegen</span>  <span class="p">(</span><span class="n">translate</span> <span class="n">IR</span> <span class="n">into</span> <span class="n">the</span> <span class="n">device</span> <span class="n">machine</span> <span class="n">code</span> <span class="n">your</span> <span class="n">GPU</span> <span class="n">runs</span><span class="p">)</span>
 </pre></div>
 </div>
-<p>The “simplify” boxes are all the same routine (internally <code class="docutils literal notranslate"><span class="pre">full_simplify</span></code>), invoked at several points. Most of the interesting optimization work happens inside it. The optional autodiff step, run only when you ask Quadrants for gradients, is covered in <a class="reference internal" href="autodiff.html"><span class="std std-doc">Automatic differentiation</span></a>.</p>
+<p>The “simplify” boxes are all the same routine, invoked at several points. Most of the interesting optimization work happens inside it. The optional autodiff step, run only when you ask Quadrants for gradients, is covered in <a class="reference internal" href="autodiff.html"><span class="std std-doc">Automatic differentiation</span></a>.</p>
 </section>
 <section id="the-simplify-loop">
 <h2>The simplify loop<a class="headerlink" href="#the-simplify-loop" title="Link to this heading">#</a></h2>
@@ -554,7 +554,7 @@
 </section>
 <section id="inspecting-what-the-compiler-did">
 <h2>Inspecting what the compiler did<a class="headerlink" href="#inspecting-what-the-compiler-did" title="Link to this heading">#</a></h2>
-<p>These environment variables dump the IR so you can see the effect of each pass. Files are written to <code class="docutils literal notranslate"><span class="pre">debug_dump_path</span></code> (default <code class="docutils literal notranslate"><span class="pre">/tmp/ir/</span></code>):</p>
+<p>These environment variables dump the IR so you can see the effect of each pass. Files are written to the directory set by the <code class="docutils literal notranslate"><span class="pre">debug_dump_path</span></code> option in <code class="docutils literal notranslate"><span class="pre">qd.init(...)</span></code> (default <code class="docutils literal notranslate"><span class="pre">/tmp/ir/</span></code>):</p>
 <ul class="simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">QD_DUMP_IR=1</span></code> - writes an IR snapshot at each major pipeline stage (after lowering, before/after each simplify, after offload).</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">QD_DUMP_SIMPLIFY=1</span></code> - writes an IR snapshot after every individual pass on every iteration of the simplify loop. Verbose, but it shows exactly which pass changed what.</p></li>
