@@ -504,7 +504,6 @@
 </table>
 </div>
 <p>Two of these - CSE and CFG optimization - run only when <code class="docutils literal notranslate"><span class="pre">opt_level</span> <span class="pre">&gt;</span> <span class="pre">0</span></code> (the default is <code class="docutils literal notranslate"><span class="pre">1</span></code>).</p>
-<p><strong>CSE is scoped per offloaded task.</strong> Once the kernel has been split, common-subexpression elimination runs over one offloaded task’s IR at a time rather than the whole kernel at once - the same per-task scoping described for <a class="reference internal" href="#control-flow-graph-cfg-optimization">CFG optimization</a> below, and for the same reason: each task is a separate device launch, so there is nothing to deduplicate across a task boundary.</p>
 </section>
 <section id="control-flow-graph-cfg-optimization">
 <h2>Control-flow-graph (CFG) optimization<a class="headerlink" href="#control-flow-graph-cfg-optimization" title="Link to this heading">#</a></h2>
@@ -514,7 +513,6 @@
 <li><p><strong>Dead-store elimination</strong> - if a write is overwritten before anyone reads it, the write is removed.</p></li>
 </ul>
 <p>Building and analyzing the CFG is the most expensive optimization in the pipeline, which is why it runs at most once per simplify stage rather than every round.</p>
-<p><strong>One CFG per offloaded task.</strong> The CFG optimization is built and run separately for each offloaded task, over that task’s IR alone - never over the whole <code class="docutils literal notranslate"><span class="pre">qd.kernel</span></code> at once. This is both faster to analyze and safe: because each task is a separate device launch, a value held in a register in one task cannot survive into the next one, so there is never anything to forward across a task boundary anyway. Anything written to global memory is treated as potentially read by a later task, so no store another task might need is dropped.</p>
 </section>
 <section id="controlling-the-passes">
 <h2>Controlling the passes<a class="headerlink" href="#controlling-the-passes" title="Link to this heading">#</a></h2>
@@ -561,6 +559,10 @@
 <li><p><code class="docutils literal notranslate"><span class="pre">QD_DUMP_CFG=1</span></code> - writes the control-flow graph itself. (This also forces the CFG pass back onto the whole-kernel path so the complete graph can be dumped.)</p></li>
 </ul>
 <p>Setting <code class="docutils literal notranslate"><span class="pre">qd.init(print_ir=True)</span></code> prints the IR to the console at pipeline stages instead of writing files.</p>
+</section>
+<section id="under-the-hood-per-task-scoping">
+<h2>Under the hood: per-task scoping<a class="headerlink" href="#under-the-hood-per-task-scoping" title="Link to this heading">#</a></h2>
+<p>Once the kernel has been split into offloaded tasks, both CSE and the CFG optimization run over <strong>one offloaded task’s IR at a time</strong>, never over the whole <code class="docutils literal notranslate"><span class="pre">qd.kernel</span></code> at once. This is both faster to analyze and safe: because each task is a separate device launch, a value held in a register in one task cannot survive into the next one, so there is never anything to deduplicate or forward across a task boundary. Anything written to global memory is treated as potentially read by a later task, so no store another task might need is dropped.</p>
 </section>
 </section>
 
@@ -617,6 +619,7 @@
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#control-flow-graph-cfg-optimization">Control-flow-graph (CFG) optimization</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#controlling-the-passes">Controlling the passes</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#inspecting-what-the-compiler-did">Inspecting what the compiler did</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#under-the-hood-per-task-scoping">Under the hood: per-task scoping</a></li>
 </ul>
   </nav></div>
 
