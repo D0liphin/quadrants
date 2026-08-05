@@ -3470,6 +3470,7 @@ LLVMCompiledKernel LLVMCompiledKernel::clone() const {
   result.per_construct_modules.reserve(per_construct_modules.size());
   for (auto &m : per_construct_modules)
     result.per_construct_modules.push_back(llvm::CloneModule(*m));
+  result.per_task_cache_stats = per_task_cache_stats;
   return result;
 }
 

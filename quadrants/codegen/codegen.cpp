@@ -6,6 +6,7 @@
 
 #if defined(QD_WITH_LLVM)
 #include "quadrants/codegen/cpu/codegen_cpu.h"
+#include "quadrants/codegen/llvm/per_task_module_cache.h"
 #include "quadrants/runtime/program_impls/llvm/llvm_program.h"
 #endif
 #if defined(QD_WITH_CUDA)
@@ -29,8 +30,10 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 
@@ -97,27 +100,54 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
   auto &offloads = block->statements;
   std::vector<std::unique_ptr<LLVMCompiledTask>> data(offloads.size());
   std::vector<std::string> pertask_keys;
-  DeviceCapabilityConfig pertask_caps;
   if (log_pertask_key) {
     pertask_keys.resize(offloads.size());
-    pertask_caps = prog->get_device_caps();
   }
+  // A1 per-task cache keying needs the device caps; fetch once (cheap) so the per-task codegen cache is always active.
+  const DeviceCapabilityConfig pertask_caps = prog->get_device_caps();
+  auto &task_cache = get_llvm_program(kernel->program)->per_task_module_cache();
+  std::atomic<int> n_cache_hit{0}, n_recompiled{0};
   for (int i = 0; i < offloads.size(); i++) {
     auto compile_func = [&, i] {
       tlctx_.fetch_this_thread_struct_module();
       auto offload = irpass::analysis::clone(offloads[i].get());
       irpass::re_id(offload.get());
 
+      const std::string key = get_hashed_per_task_cache_key(compile_config_, pertask_caps,
+                                                            offload->as<OffloadedStmt>(), kernel->autodiff_mode);
       if (log_pertask_key) {
-        pertask_keys[i] =
-            get_hashed_per_task_cache_key(compile_config_, pertask_caps, offload->as<OffloadedStmt>(),
-                                          kernel->autodiff_mode);
+        pertask_keys[i] = key;
       }
 
+      {  // Cache hit: reuse the cached task module by cloning it into this worker's LLVM context.
+        std::lock_guard<std::mutex> g(task_cache.mu);
+        auto it = task_cache.entries.find(key);
+        if (it != task_cache.entries.end()) {
+          auto mod = tlctx_.clone_module_to_this_thread_context(it->second.module.get());
+          data[i] = std::make_unique<LLVMCompiledTask>(it->second.tasks, std::move(mod), it->second.used_tree_ids,
+                                                        it->second.struct_for_tls_sizes);
+          n_cache_hit.fetch_add(1, std::memory_order_relaxed);
+          return;
+        }
+      }
+
+      // Cache miss: lower the task (the expensive step, done outside the cache lock) and store it.
       Block blk;
       blk.insert(std::move(offload));
       auto new_data = this->compile_task(i, compile_config_, nullptr, &blk);
+      {
+        std::lock_guard<std::mutex> g(task_cache.mu);
+        if (task_cache.entries.find(key) == task_cache.entries.end()) {
+          PerTaskModuleCache::Entry e;
+          e.module = tlctx_.clone_module_to_context(new_data.module.get(), &task_cache.ctx);
+          e.tasks = new_data.tasks;
+          e.used_tree_ids = new_data.used_tree_ids;
+          e.struct_for_tls_sizes = new_data.struct_for_tls_sizes;
+          task_cache.entries.emplace(key, std::move(e));
+        }
+      }
       data[i] = std::make_unique<LLVMCompiledTask>(std::move(new_data));
+      n_recompiled.fetch_add(1, std::memory_order_relaxed);
     };
     worker.enqueue(compile_func);
   }
@@ -290,6 +320,7 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
   optimize_module(llvm_compiled_kernel.module.get());
   auto t_end = _pt_now();
   llvm_compiled_kernel.per_construct_modules = std::move(per_construct_modules);
+  llvm_compiled_kernel.per_task_cache_stats = {(int)offloads.size(), n_cache_hit.load(), n_recompiled.load()};
   if (phase_time) {
     QD_INFO(
         "[phase-time] kernel={} n_tasks={} pertask_compile={:.1f}ms per_construct_selfcontained={:.1f}ms(n={}) "

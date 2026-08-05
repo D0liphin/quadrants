@@ -27,6 +27,20 @@ class FeLlCacheObservations:
 
 
 @dataclass
+class PerOffloadCacheObservations:
+    """Per-construct (per-offloaded-task) compilation cache stats for one kernel compile.
+
+    A "construct" is one top-level offloaded region of the kernel. On a warm compile where only one construct changed,
+    the expected result is ``constructs_recompiled == 1`` and ``constructs_cache_hit == constructs_total - 1``. Counts
+    (not wall time) so the behavior can be asserted deterministically in tests.
+    """
+
+    constructs_total: int = 0
+    constructs_cache_hit: int = 0
+    constructs_recompiled: int = 0
+
+
+@dataclass
 class LaunchObservations:
     found_kernel_in_materialize_cache: bool = False
 
