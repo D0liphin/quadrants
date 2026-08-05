@@ -417,7 +417,7 @@ void run_offload_gt_census(IRNode *ir, const std::unordered_map<int, int> &owner
 // defs (catch-2: recompute per construct), run the normal `offload` on the isolated construct, and collect its
 // OffloadedStmts. Cross-construct memory ordering is preserved by keeping tasks in original construct order; pure value
 // coupling is preserved by duplicating the defs into each clone. (Cross-construct global-temp slots are NOT yet
-// coordinated here -- kernels that need them require S2a′ shared offsets; this prototype targets constructs whose
+// coordinated here -- kernels that need them require S2a' shared offsets; this prototype targets constructs whose
 // offload allocates only construct-private / no global-temp slots.)
 void split_offload_per_construct(IRNode *ir, const CompileConfig &config) {
   auto *block = ir->cast<Block>();
