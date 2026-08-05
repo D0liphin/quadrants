@@ -616,7 +616,7 @@
 <tr class="row-even"><td><p>16x16</p></td>
 <td class="text-right"><p>16</p></td>
 <td class="text-right"><p>16</p></td>
-<td><p>Small problems where occupancy from many narrow blocks matters; very small N (e.g. N≤16 or N≈48) where the 32-tile would waste lanes</p></td>
+<td><p>Small problems where many narrow blocks keep the GPU busy; very small N (e.g. N &lt;= 16, or N around 48) where the 32-tile would waste lanes</p></td>
 </tr>
 <tr class="row-odd"><td><p>32x32</p></td>
 <td class="text-right"><p>32</p></td>
@@ -679,7 +679,7 @@
 </section>
 <section id="example-blocked-cholesky">
 <h2>Example: blocked Cholesky<a class="headerlink" href="#example-blocked-cholesky" title="Link to this heading">#</a></h2>
-<p>See <a class="reference download internal" download="" href="../_downloads/10e91aecf2d7d697024a911dd28bc249/cholesky_blocked.py"><span class="xref download myst"><code class="docutils literal notranslate"><span class="pre">misc/demos/cholesky_blocked.py</span></code></span></a> for a complete blocked Cholesky factorization using Tile16x16, benchmarked against scalar-Crout baselines (shared memory with 64 threads, and blocked shared memory with 16 threads).</p>
+<p>See <a class="reference download internal" download="" href="../_downloads/10e91aecf2d7d697024a911dd28bc249/cholesky_blocked.py"><span class="xref download myst"><code class="docutils literal notranslate"><span class="pre">misc/demos/cholesky_blocked.py</span></code></span></a> for a complete blocked Cholesky factorization using Tile16x16, benchmarked against scalar (non-tile) baselines (shared memory with 64 threads, and blocked shared memory with 16 threads).</p>
 <p>Results on RTX PRO 6000 Blackwell, 4096 environments, N=92, f32:</p>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
@@ -690,12 +690,12 @@
 </tr>
 </thead>
 <tbody>
-<tr class="row-even"><td><p>baseline (scalar Crout, shared mem)</p></td>
+<tr class="row-even"><td><p>baseline (scalar, shared mem)</p></td>
 <td class="text-right"><p>64</p></td>
 <td class="text-right"><p>2766</p></td>
 <td class="text-right"><p>1.00x</p></td>
 </tr>
-<tr class="row-odd"><td><p>blocked (scalar Crout, shared mem)</p></td>
+<tr class="row-odd"><td><p>blocked (scalar, shared mem)</p></td>
 <td class="text-right"><p>16</p></td>
 <td class="text-right"><p>2556</p></td>
 <td class="text-right"><p>1.08x</p></td>
