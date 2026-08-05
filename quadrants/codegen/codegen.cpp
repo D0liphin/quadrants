@@ -113,15 +113,36 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
       auto offload = irpass::analysis::clone(offloads[i].get());
       irpass::re_id(offload.get());
 
+      // The A1 task key is name/index-independent (re-id'd body + config + caps + touched-SNode layout + autodiff
+      // mode). But the compiled module bakes in `task_codegen_id` -- the offload's index within THIS kernel -- into the
+      // entry function name (`{kernel}_{id}_{taskname}`), `shared_array_t{id}_...` globals, and the
+      // `adstack_row_counters[id]` indices. So the in-memory cache key must include the task index: otherwise two
+      // byte-identical tasks at different indices (e.g. repeated `deactivate` loops emit identical serial/gc tasks)
+      // alias to one cached module and produce duplicate symbols that collide at link time. Reuse across *different*
+      // kernels at the same index is still sound -- the reused module keeps the original kernel's (unique) symbol
+      // names, which stay unique within the new kernel's linked module.
       const std::string key = get_hashed_per_task_cache_key(compile_config_, pertask_caps,
                                                             offload->as<OffloadedStmt>(), kernel->autodiff_mode);
       if (log_pertask_key) {
         pertask_keys[i] = key;
       }
+      const std::string cache_key = key + "#" + std::to_string(i);
 
-      {  // Cache hit: reuse the cached task module by cloning it into this worker's LLVM context.
+      // Autodiff tasks register per-task AdStack sizing into the program-scoped adstack cache as a compile-time side
+      // effect keyed on {kernel_name, task_codegen_id}; a cross-kernel cache hit would skip that registration, so keep
+      // adstack-bearing tasks off the reuse path and always lower them.
+      bool has_adstack = false;
+      irpass::analysis::gather_statements(offload.get(), [&has_adstack](Stmt *s) {
+        if (s->is<AdStackAllocaStmt>()) {
+          has_adstack = true;
+        }
+        return false;
+      });
+      const bool cacheable = !has_adstack;
+
+      if (cacheable) {  // Cache hit: reuse the cached task module by cloning it into this worker's LLVM context.
         std::lock_guard<std::mutex> g(task_cache.mu);
-        auto it = task_cache.entries.find(key);
+        auto it = task_cache.entries.find(cache_key);
         if (it != task_cache.entries.end()) {
           auto mod = tlctx_.clone_module_to_this_thread_context(it->second.module.get());
           data[i] = std::make_unique<LLVMCompiledTask>(it->second.tasks, std::move(mod), it->second.used_tree_ids,
@@ -135,15 +156,15 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
       Block blk;
       blk.insert(std::move(offload));
       auto new_data = this->compile_task(i, compile_config_, nullptr, &blk);
-      {
+      if (cacheable) {
         std::lock_guard<std::mutex> g(task_cache.mu);
-        if (task_cache.entries.find(key) == task_cache.entries.end()) {
+        if (task_cache.entries.find(cache_key) == task_cache.entries.end()) {
           PerTaskModuleCache::Entry e;
           e.module = tlctx_.clone_module_to_context(new_data.module.get(), &task_cache.ctx);
           e.tasks = new_data.tasks;
           e.used_tree_ids = new_data.used_tree_ids;
           e.struct_for_tls_sizes = new_data.struct_for_tls_sizes;
-          task_cache.entries.emplace(key, std::move(e));
+          task_cache.entries.emplace(cache_key, std::move(e));
         }
       }
       data[i] = std::make_unique<LLVMCompiledTask>(std::move(new_data));
