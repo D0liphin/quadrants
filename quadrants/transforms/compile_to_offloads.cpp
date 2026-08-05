@@ -463,6 +463,83 @@ void split_offload_per_construct(IRNode *ir, const CompileConfig &config) {
     QD_INFO("[split-offload] top_level_stmts={} constructs_compiled={} tasks_produced={}", n, n_constructs,
             (int)block->statements.size());
 }
+
+// S2 step A (design §9.A): run the whole pre-offload + offload frontend on ONE isolated top-level construct instead of
+// once over the whole kernel. Mirrors the kNone / non-mesh portion of the whole-kernel sequence in
+// `compile_to_offloads` between simplify_I and simplify_III, in the same order, so a per-construct compile produces the
+// same tasks the whole-kernel path would for that construct. `cb` is a construct already isolated + recomputed (other
+// constructs dropped, shared defs DIE'd) by `split_frontend_per_construct`.
+void run_construct_frontend(IRNode *cb, const CompileConfig &config, const Kernel *kernel, bool verbose) {
+  const std::string &name = kernel->get_name();
+  irpass::full_simplify(cb, config, {false, /*autodiff_enabled*/ false, name, verbose, "simplify_I"});
+  irpass::handle_external_ptr_boundary(cb, config);
+  if (config.check_out_of_bound)
+    irpass::check_out_of_bound(cb, config, {name});
+  irpass::merge_global_ptrs(cb);
+  irpass::flag_access(cb);
+  irpass::full_simplify(cb, config, {false, /*autodiff_enabled*/ false, name, verbose, "simplify_II"});
+  irpass::offload(cb, config);
+  if (config.opt_level > 0)
+    irpass::cse_offloaded_tasks(cb);
+  irpass::flag_access(cb);
+  irpass::full_simplify(cb, config, {false, /*autodiff_enabled*/ false, name, verbose, "simplify_III"});
+}
+
+bool block_has_mesh_for(Block *block) {
+  if (block == nullptr)
+    return false;
+  auto sub = irpass::analysis::gather_statements(block, [](Stmt *s) { return s->is<MeshForStmt>(); });
+  return !sub.empty();
+}
+
+// S2 step A driver (env QD_SPLIT_FRONTEND=1): split the flat top-level block into constructs right after lower_ast +
+// the structural prefix, run the full per-construct frontend on each (with recompute of shared top-level defs,
+// catch-2), and reassemble the produced OffloadedStmts in source order. This is the correctness backbone for the
+// per-construct frontend cache (§9): each construct compiles independently so its simplify/mgp buckets are tiny (S0b)
+// and its output can later be keyed + cached + skipped (§9.B/C). Correctness for recompute-safe kernels rests on S2b:
+// cross-construct global-temp hubs dissolve via recompute, and cross-construct memory ordering is preserved by keeping
+// tasks in original construct order. Restricted to autodiff_mode==kNone / non-mesh kernels by the caller; anything
+// else falls back to the whole-kernel path.
+void split_frontend_per_construct(IRNode *ir, const CompileConfig &config, const Kernel *kernel, bool verbose) {
+  auto *block = ir->cast<Block>();
+  QD_ASSERT(block != nullptr);
+  const int n = (int)block->statements.size();
+  std::vector<std::unique_ptr<Stmt>> tasks;
+  int n_constructs = 0;
+  for (int i = 0; i < n; i++) {
+    Stmt *target = block->statements[i].get();
+    if (!target->is_container_statement() && !target->has_global_side_effect())
+      continue;  // pure value defs produce no task; they are recomputed into each consuming construct below
+    n_constructs++;
+    auto cloned = irpass::analysis::clone(block);
+    auto *cb = cloned->cast<Block>();
+    cb->set_parent_callable(block->parent_callable());
+    Stmt *ctarget = cb->statements[i].get();
+    std::vector<Stmt *> to_remove;
+    for (auto &s : cb->statements) {
+      Stmt *sj = s.get();
+      if (sj != ctarget && (sj->is_container_statement() || sj->has_global_side_effect()))
+        to_remove.push_back(sj);
+    }
+    for (Stmt *sj : to_remove)
+      cb->extract(sj);
+    irpass::die(cb);  // catch-2: drop shared top-level defs this construct doesn't use (recompute per construct)
+    run_construct_frontend(cb, config, kernel, verbose);
+    while (!cb->statements.empty())
+      tasks.push_back(cb->extract(0));
+  }
+  while (!block->statements.empty())
+    block->extract(0);
+  for (auto &t : tasks)
+    block->insert(std::move(t));
+  static const bool split_log = []() {
+    const char *e = std::getenv("QD_SPLIT_LOG");
+    return e != nullptr && std::string(e) == "1";
+  }();
+  if (split_log)
+    QD_INFO("[split-frontend] kernel={} top_level_stmts={} constructs_compiled={} tasks_produced={}",
+            kernel->get_name(), n, n_constructs, (int)block->statements.size());
+}
 }  // namespace
 
 namespace irpass {
@@ -528,6 +605,10 @@ void compile_to_offloads(IRNode *ir,
     const char *e = std::getenv("QD_MGP_PER_CONSTRUCT");
     return e != nullptr && std::string(e) == "1";
   }();
+  static const bool split_frontend = []() {
+    const char *e = std::getenv("QD_SPLIT_FRONTEND");
+    return e != nullptr && std::string(e) == "1";
+  }();
   if (construct_census)
     run_construct_census(ir, kernel->get_name(), "after_lower_ast");
 
@@ -559,6 +640,18 @@ void compile_to_offloads(IRNode *ir,
   }
 
   dump_ir("before_simplify_I");
+
+  // S2 step A (design §9.A, env QD_SPLIT_FRONTEND=1): for recompute-safe kernels (forward-only, non-mesh), run the
+  // remaining pre-offload + offload frontend PER top-level construct and reassemble, instead of once over the whole
+  // kernel. The seam is here — right after lower_ast + the structural prefix (function inlining, matrix-ptr lowering,
+  // bit-loop vectorize), before the expensive simplify/merge_global_ptrs/offload passes (§7.3). Anything not
+  // recompute-safe (autodiff, mesh-for) falls through to the whole-kernel path below.
+  if (split_frontend && autodiff_mode == AutodiffMode::kNone && !block_has_mesh_for(ir->cast<Block>())) {
+    split_frontend_per_construct(ir, config, kernel, verbose);
+    dump_ir("after_offload");
+    return;
+  }
+
   irpass::full_simplify(
       ir, config,
       {false, /*autodiff_enabled*/ autodiff_mode != AutodiffMode::kNone, kernel->get_name(), verbose, "simplify_I"});
