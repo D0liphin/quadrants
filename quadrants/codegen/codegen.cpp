@@ -121,8 +121,8 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
       // alias to one cached module and produce duplicate symbols that collide at link time. Reuse across *different*
       // kernels at the same index is still sound -- the reused module keeps the original kernel's (unique) symbol
       // names, which stay unique within the new kernel's linked module.
-      const std::string key = get_hashed_per_task_cache_key(compile_config_, pertask_caps,
-                                                            offload->as<OffloadedStmt>(), kernel->autodiff_mode);
+      const std::string key =
+          get_hashed_per_task_cache_key(compile_config_, pertask_caps, offload->as<OffloadedStmt>(), kernel);
       if (log_pertask_key) {
         pertask_keys[i] = key;
       }

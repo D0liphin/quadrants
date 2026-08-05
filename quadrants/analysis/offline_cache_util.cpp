@@ -261,21 +261,36 @@ std::vector<const SNode *> gather_task_snode_roots(OffloadedStmt *task) {
 std::string get_hashed_per_task_cache_key(const CompileConfig &config,
                                           const DeviceCapabilityConfig &caps,
                                           OffloadedStmt *task,
-                                          AutodiffMode autodiff_mode) {
+                                          const Kernel *kernel) {
   QD_ASSERT(task);
+  QD_ASSERT(kernel);
   auto compile_config_key = get_offline_cache_key_of_compile_config(config);
   auto device_caps_key = get_offline_cache_key_of_device_caps(caps);
+  // The compiled task reads its arguments and writes its returns through the kernel's context struct, whose layout is
+  // fixed by the kernel's parameter/return ABI (arg count, dtypes, ndarray element shapes, ret struct), NOT by the
+  // task body. Two byte-identical task bodies in kernels with different ABIs -- e.g. the fill loop over a
+  // `Vector.ndarray` vs a `Matrix.ndarray` -- must not share a compiled module, or the reuse reads/writes the wrong
+  // context offsets.
+  auto kernel_params_key = get_offline_cache_key_of_parameter_list(kernel->parameter_list);
+  auto kernel_rets_key = get_offline_cache_key_of_rets(kernel->rets);
   std::string task_body_string = serialize_task_body(task);
-  std::string autodiff_mode_string = std::to_string(static_cast<std::size_t>(autodiff_mode));
+  std::string autodiff_mode_string = std::to_string(static_cast<std::size_t>(kernel->autodiff_mode));
 
   picosha2::hash256_one_by_one hasher;
   hasher.process(compile_config_key.begin(), compile_config_key.end());
   hasher.process(device_caps_key.begin(), device_caps_key.end());
+  hasher.process(kernel_params_key.begin(), kernel_params_key.end());
+  hasher.process(kernel_rets_key.begin(), kernel_rets_key.end());
   // Layout signature of every SNode tree the task touches: struct-access code is inlined per task, so the tree
-  // *layout* (not just its name, which is all the printed IR carries) is part of the compiled code.
+  // *layout* (not just its name, which is all the printed IR carries) is part of the compiled code. Also fold in the
+  // tree id: the compiled module references that tree's struct-access functions by id, so a cached module is only
+  // reusable for the same tree instance -- two identical-layout trees with different ids must not alias (the
+  // in-memory cache is program-scoped, so tree ids are stable within it).
   for (const SNode *root : gather_task_snode_roots(task)) {
     std::string snode_key = get_hashed_offline_cache_key_of_snode(root);
     hasher.process(snode_key.begin(), snode_key.end());
+    std::string tree_id_key = std::to_string(root->get_snode_tree_id());
+    hasher.process(tree_id_key.begin(), tree_id_key.end());
   }
   hasher.process(task_body_string.begin(), task_body_string.end());
   hasher.process(autodiff_mode_string.begin(), autodiff_mode_string.end());
