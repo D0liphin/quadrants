@@ -2,12 +2,11 @@
 fields.
 
 PERF NOTE: everything about ``Final`` resolution is computed **once per dataclass type** and cached in
-``_final_plan_cache``. Callers on the per-launch hot path (``_extract_arg``,
-``args_hasher.dataclass_to_repr``) do a single ``dict.get`` keyed on the dataclass type and then, in the
-overwhelmingly common no-Final-field case, take a branch that is byte-for-byte the pre-existing code path. No
-``isinstance`` / ``typing.get_origin`` / ``dataclasses.fields`` call happens per launch. See the module docstring of
-``_template_mapper_hotpath.py`` for why that matters (``isinstance`` is a ~100-200ns MRO walk vs a ~10ns pointer
-comparison for ``type(x) is Y``).
+``_final_plan_cache``. Callers on the per-launch hot path (``_extract_arg``, ``args_hasher.dataclass_to_repr``) do a
+single ``dict.get`` keyed on the dataclass type and then, in the overwhelmingly common no-Final-field case, take a
+branch that is byte-for-byte the pre-existing code path. No ``isinstance`` / ``typing.get_origin`` /
+``dataclasses.fields`` call happens per launch. See the module docstring of ``_template_mapper_hotpath.py`` for why
+that matters (``isinstance`` is a ~100-200ns MRO walk vs a ~10ns pointer comparison for ``type(x) is Y``).
 """
 
 import dataclasses
@@ -149,9 +148,9 @@ def _build_final_plan(dc_type: type) -> "frozenset[str]":
                 )
             continue
         if not is_final_annotation(annotation):
-            # Catch a ``Final``-like special form that is not ``typing.Final`` - e.g. if a future
-            # ``typing_extensions`` stops aliasing the stdlib object. Silently treating it as a runtime field would
-            # be a correctness trap of exactly the kind above.
+            # Catch a ``Final``-like special form that is not ``typing.Final`` - e.g. if a future ``typing_extensions``
+            # release stops aliasing the stdlib object. Silently treating such a field as a runtime one would be a
+            # correctness trap of exactly the kind described just above.
             origin = typing.get_origin(annotation)
             if origin is not None and "Final" in _describe_annotation(origin):
                 raise TypeError(

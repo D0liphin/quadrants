@@ -3270,9 +3270,9 @@ def test_final_field_bakes_as_compile_time_constant_via_qd_static():
     ``QuadrantsCompilationError: Invalid data type typing.Final[int]`` before this change).
 
     ``qd.static(config.dt)`` is materialised into a named local ``dt_const`` before the kernel's inner-loop assign to
-    avoid ``build_Assign``'s ``is_static_assign`` check (``out[i] = qd.static(...)`` is rejected as
-    "Static assign cannot be used on elements in arrays"). Reading the same Python value from a bound local is
-    unaffected - it's still the baked constant."""
+    avoid ``build_Assign``'s ``is_static_assign`` check, which rejects ``out[i] = qd.static(...)`` with "Static assign
+    cannot be used on elements in arrays". Reading the same Python value from a bound local is unaffected - it is
+    still the baked constant."""
     from typing import Final
 
     @dataclass(frozen=True)
@@ -3460,10 +3460,10 @@ def test_final_field_with_ndarray_sibling():
 @test_utils.test()
 def test_final_field_value_is_part_of_offline_fastcache_key(tmp_path: Path):
     """A Final field's value must be part of the *offline* fastcache key, not just the in-process template mapper spec
-    key. Regression test for a soundness bug in the original implementation: because
-    ``args_hasher.dataclass_to_repr`` only appended a field's value to the cache key when
-    ``FIELD_METADATA_CACHE_VALUE`` metadata was set, a kernel compiled with ``offset=7`` baked in was loaded from the
-    offline cache in a later process for a config carrying ``offset=100``, silently returning 7.
+    key. Regression test for a soundness bug in the original implementation: because ``dataclass_to_repr`` only
+    appended a field's value to the cache key when that field carried ``FIELD_METADATA_CACHE_VALUE`` metadata, a kernel
+    compiled with ``offset=7`` baked in was loaded from the offline cache in a later process for a config carrying
+    ``offset=100``, silently returning 7.
 
     Uses two separate ``qd.init`` cycles sharing one ``offline_cache_file_path`` so the second launch genuinely hits
     the persisted cache - the same structure as ``test_prune_used_parameters_fastcache_dead_static_branch``."""

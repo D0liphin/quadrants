@@ -126,8 +126,8 @@ def _get_frozen_dc_plan(
     # ``typing.Final[T]`` fields are baked as compile-time constants in the kernel body (see
     # ``FunctionDefTransformer._transform_kernel_arg``) and folded into the template spec key (see ``_extract_arg``),
     # so they own no runtime arg slot. Excluding them from the plan keeps the launch loop and the underlying kernel
-    # argument count consistent, and costs nothing per launch - the plan itself is already cached per
-    # (used_params, class, basename).
+    # argument count consistent, and costs nothing per launch since the plan itself is already cached per
+    # (used_params, class, basename) triple.
     final_names = final_field_names(struct_cls)
     entries: list[tuple[str, str, Any]] = []
     for field in fields_dict.values():
