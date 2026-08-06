@@ -451,7 +451,10 @@ void export_lang(nb::module_ &m) {
       .def_ro("cache_key", &CompileResult::cache_key)
       .def_ro("per_offload_total", &CompileResult::per_offload_total)
       .def_ro("per_offload_cache_hit", &CompileResult::per_offload_cache_hit)
-      .def_ro("per_offload_recompiled", &CompileResult::per_offload_recompiled);
+      .def_ro("per_offload_recompiled", &CompileResult::per_offload_recompiled)
+      .def_ro("per_construct_total", &CompileResult::per_construct_total)
+      .def_ro("per_construct_cache_hit", &CompileResult::per_construct_cache_hit)
+      .def_ro("per_construct_recompiled", &CompileResult::per_construct_recompiled);
 
   nb::class_<Axis>(m, "Axis").def(nb::init<int>());
   nb::class_<SNode>(m, "SNodeCxx")

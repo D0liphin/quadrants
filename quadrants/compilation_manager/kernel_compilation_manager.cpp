@@ -71,7 +71,9 @@ CompileResult KernelCompilationManager::load_or_compile(const CompileConfig &com
   const CompiledKernelData &ckd =
       cached_kernel ? *cached_kernel : compile_and_cache_kernel(kernel_key, compile_config, caps, kernel_def);
   auto pt = ckd.get_per_task_cache_stats();
-  return CompileResult{ckd, cache_hit, kernel_key, pt.total, pt.cache_hit, pt.recompiled};
+  return CompileResult{ckd,       cache_hit,          kernel_key,           pt.total,
+                       pt.cache_hit, pt.recompiled,   pt.construct_total,   pt.construct_cache_hit,
+                       pt.construct_recompiled};
 }
 
 void KernelCompilationManager::dump() {

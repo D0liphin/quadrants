@@ -7,6 +7,9 @@
 #include "quadrants/program/extension.h"
 #include "quadrants/program/function.h"
 #include "quadrants/program/kernel.h"
+#include "quadrants/program/program.h"
+#include "quadrants/program/per_construct_cache.h"
+#include "quadrants/analysis/offline_cache_util.h"
 #include "quadrants/util/lang_util.h"
 #include "quadrants/codegen/ir_dump.h"
 #include <fstream>
@@ -659,8 +662,22 @@ void split_frontend_per_construct(IRNode *ir, const CompileConfig &config, const
   }
   const int n_segs = (int)seg_emits_task.size();
 
+  // S2 step C (§9.C): program-scoped per-construct FRONTEND cache. On a warm compile only the changed construct's
+  // frontend re-runs; unchanged constructs are cloned out of the cache, skipping simplify/mgp/offload. Content-keyed,
+  // so identical constructs across kernels (same ABI/config) share entries. Default on whenever the split runs;
+  // QD_CONSTRUCT_CACHE=0 disables it for A/B equivalence checks.
+  static const bool construct_cache_on = []() {
+    const char *e = std::getenv("QD_CONSTRUCT_CACHE");
+    return e == nullptr || std::string(e) != "0";
+  }();
+  PerConstructCache *cc =
+      (construct_cache_on && kernel->program != nullptr) ? &kernel->program->per_construct_cache() : nullptr;
+
   std::vector<std::unique_ptr<Stmt>> tasks;
-  int n_constructs = 0;
+  int n_constructs = 0, n_hit = 0, n_recompiled = 0;
+  double key_ms = 0.0, fe_ms = 0.0;  // diagnostic: time in construct-key vs the (cached-out) frontend
+  auto _now = []() { return std::chrono::steady_clock::now(); };
+  auto _ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
   for (int k = 0; k < n_segs; k++) {
     if (!seg_emits_task[k])
       continue;  // pure-def-only serial run: no standalone task, recomputed into consuming constructs below
@@ -708,21 +725,67 @@ void split_frontend_per_construct(IRNode *ir, const CompileConfig &config, const
     if (split_trace())
       QD_INFO("[split-trace] {}: construct #{} (seg {}) post-die stmts={}", kernel->get_name(), n_constructs, k,
               (int)cb->statements.size());
+
+    // Key the isolated, re-id'd construct and consult the cache. Key + clone are cheap; the expensive
+    // run_construct_frontend on a miss runs OUTSIDE the cache lock so parallel kernel compiles never serialize on it.
+    bool hit = false;
+    std::string ckey;
+    if (cc != nullptr) {
+      irpass::re_id(cb);
+      auto _k0 = _now();
+      ckey = get_hashed_per_construct_cache_key(config, cb, kernel);
+      key_ms += _ms(_k0, _now());
+      std::lock_guard<std::mutex> g(cc->mu);
+      auto it = cc->entries.find(ckey);
+      if (it != cc->entries.end()) {
+        for (auto &t : it->second)
+          tasks.push_back(irpass::analysis::clone(t.get()));
+        hit = true;
+      }
+    }
+    if (hit) {
+      n_hit++;
+      if (split_trace())
+        QD_INFO("[split-trace] {}: construct #{} (seg {}) cache HIT ckey={}", kernel->get_name(), n_constructs, k,
+                ckey);
+      continue;
+    }
+
+    auto _f0 = _now();
     run_construct_frontend(cb, config, kernel, verbose);
+    fe_ms += _ms(_f0, _now());
+    n_recompiled++;
+    std::vector<std::unique_ptr<Stmt>> produced;
     while (!cb->statements.empty())
-      tasks.push_back(cb->extract(0));
+      produced.push_back(cb->extract(0));
+    if (cc != nullptr) {
+      std::vector<std::unique_ptr<Stmt>> stored;
+      stored.reserve(produced.size());
+      for (auto &t : produced)
+        stored.push_back(irpass::analysis::clone(t.get()));
+      std::lock_guard<std::mutex> g(cc->mu);
+      cc->entries.emplace(ckey, std::move(stored));  // emplace: a racing store of the same key wins harmlessly
+    }
+    for (auto &t : produced)
+      tasks.push_back(std::move(t));
   }
   while (!block->statements.empty())
     block->extract(0);
   for (auto &t : tasks)
     block->insert(std::move(t));
+  if (cc != nullptr) {
+    std::lock_guard<std::mutex> g(cc->mu);
+    cc->last_stats[kernel->get_name()] = {n_constructs, n_hit, n_recompiled};
+  }
   static const bool split_log = []() {
     const char *e = std::getenv("QD_SPLIT_LOG");
     return e != nullptr && std::string(e) == "1";
   }();
   if (split_log)
-    QD_INFO("[split-frontend] kernel={} top_level_stmts={} constructs_compiled={} tasks_produced={}",
-            kernel->get_name(), n, n_constructs, (int)block->statements.size());
+    QD_INFO(
+        "[split-frontend] kernel={} top_level_stmts={} constructs_compiled={} constructs_cache_hit={} "
+        "constructs_recompiled={} tasks_produced={} key_ms={:.1f} frontend_ms={:.1f}",
+        kernel->get_name(), n, n_constructs, n_hit, n_recompiled, (int)block->statements.size(), key_ms, fe_ms);
 }
 }  // namespace
 

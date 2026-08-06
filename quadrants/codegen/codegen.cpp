@@ -21,6 +21,7 @@
 #include "quadrants/ir/statements.h"
 #include "quadrants/ir/transforms.h"
 #include "quadrants/analysis/offline_cache_util.h"
+#include "quadrants/program/per_construct_cache.h"
 #include "quadrants/rhi/device_capability.h"
 
 #if defined(QD_WITH_LLVM)
@@ -342,6 +343,18 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
   auto t_end = _pt_now();
   llvm_compiled_kernel.per_construct_modules = std::move(per_construct_modules);
   llvm_compiled_kernel.per_task_cache_stats = {(int)offloads.size(), n_cache_hit.load(), n_recompiled.load()};
+  // If the per-construct frontend split ran for this kernel (§9.C), surface its cache stats alongside the per-task
+  // ones. Recorded by `split_frontend_per_construct` on the program-scoped construct cache, keyed by kernel name.
+  {
+    auto &cc = kernel->program->per_construct_cache();
+    std::lock_guard<std::mutex> g(cc.mu);
+    auto it = cc.last_stats.find(kernel->get_name());
+    if (it != cc.last_stats.end()) {
+      llvm_compiled_kernel.per_task_cache_stats.construct_total = it->second.total;
+      llvm_compiled_kernel.per_task_cache_stats.construct_cache_hit = it->second.hit;
+      llvm_compiled_kernel.per_task_cache_stats.construct_recompiled = it->second.recompiled;
+    }
+  }
   if (phase_time) {
     QD_INFO(
         "[phase-time] kernel={} n_tasks={} pertask_compile={:.1f}ms per_construct_selfcontained={:.1f}ms(n={}) "
