@@ -183,11 +183,16 @@ def _build_final_plan(dc_type: type) -> "frozenset[str]":
 _final_plan_cache: "dict[type, frozenset[str]]" = {}
 
 
-def final_field_names(dc_type: type) -> "frozenset[str]":
+def final_field_names(dc_type: Any) -> "frozenset[str]":
     """Return the cached set of ``Final``-annotated field names on ``dc_type``, validating on first sighting.
 
     Hot-path contract: one ``dict.get``. Callers should short-circuit on the empty result so that dataclasses with no
     ``Final`` fields (the overwhelmingly common case) run the pre-existing code path untouched.
+
+    ``dc_type`` is typed ``Any`` rather than ``type`` because ``_extract_arg`` calls this with its loosely-typed
+    ``annotation`` parameter (a union covering every kernel-arg annotation shape), having already established that it
+    is a dataclass type via the ``__dataclass_fields__`` probe. Narrowing at that call site would need a
+    ``typing.cast``, which is a real function call on a per-launch path.
     """
     names = _final_plan_cache.get(dc_type)
     if names is None:
