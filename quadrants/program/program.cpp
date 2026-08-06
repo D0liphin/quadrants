@@ -236,6 +236,16 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
   free_snode_tree_ids_.push(snode_tree->id());
   // The destroyed tree's `SNode *`s are about to be freed; cached entries pointing into them must go.
   snode_id_cache_.clear();
+  // Same hazard, sharper: the per-construct frontend cache (§9.C) holds cloned OffloadedStmt IR that references this
+  // tree's `SNode *`s, and its key folds only the tree id -- which `allocate_snode_tree_id()` RECYCLES from
+  // `free_snode_tree_ids_`. Without this wipe a later same-id tree (possibly a different layout) would false-hit and
+  // clone IR holding freed `SNode *`s. Clearing on destroy is what makes the cheap tree-id-only key sound: within any
+  // interval with no destroy, tree-id -> layout is a stable bijection and the cached pointers stay live.
+  {
+    std::lock_guard<std::mutex> g(per_construct_cache_->mu);
+    per_construct_cache_->entries.clear();
+    per_construct_cache_->last_stats.clear();
+  }
 }
 
 SNodeTree *Program::add_snode_tree(std::unique_ptr<SNode> root, bool compile_only) {

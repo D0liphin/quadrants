@@ -316,11 +316,13 @@ std::string get_hashed_per_construct_cache_key(const CompileConfig &config,
   hasher.process(compile_config_key.begin(), compile_config_key.end());
   hasher.process(kernel_params_key.begin(), kernel_params_key.end());
   hasher.process(kernel_rets_key.begin(), kernel_rets_key.end());
-  // In-memory, program-scoped cache: an SNode tree instance's LAYOUT cannot change within one Program, so folding the
-  // tree id alone (a cheap int) disambiguates instances without the O(tree_size) full-layout serialization that
-  // `get_hashed_offline_cache_key_of_snode` performs. Doing that layout hash per construct on a big genesis SNode tree
-  // was a >20x cold-compile blowup; the tree id is sufficient here. The cross-process disk tier (§9.D) will re-add the
-  // full layout hash to its (persisted) key.
+  // In-memory, program-scoped cache: fold only the tree id (a cheap int), NOT the O(tree_size) full-layout hash that
+  // `get_hashed_offline_cache_key_of_snode` computes (doing that per construct on a big genesis tree was a >20x
+  // cold-compile blowup). This is sound because `Program::destroy_snode_tree` WIPES the per-construct cache: a tree
+  // instance's layout is immutable once materialized, and the only way to change it (or to recycle a tree id via
+  // `free_snode_tree_ids_`) is to destroy + re-add, which clears the cache. So within any interval with no destroy,
+  // tree-id -> layout is a stable bijection here. The cross-process disk tier (§9.D) has no such lifetime guarantee and
+  // WILL re-add the full layout hash to its (persisted) key.
   for (const SNode *root : gather_ir_snode_roots(construct)) {
     std::string tree_id_key = std::to_string(root->get_snode_tree_id());
     hasher.process(tree_id_key.begin(), tree_id_key.end());
