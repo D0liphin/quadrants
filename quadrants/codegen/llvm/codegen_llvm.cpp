@@ -3467,12 +3467,20 @@ LLVMCompiledTask LLVMCompiledTask::clone() const {
 
 LLVMCompiledKernel LLVMCompiledKernel::clone() const {
   LLVMCompiledKernel result{tasks, module ? llvm::CloneModule(*module) : nullptr};
-  result.per_construct_modules.reserve(per_construct_modules.size());
-  for (auto &m : per_construct_modules)
-    result.per_construct_modules.push_back(llvm::CloneModule(*m));
-  // Must travel with the modules: the launcher consumes a clone, and dropping the keys would silently demote the
-  // cubin disk cache to the LLVM-text-hash fallback.
-  result.per_construct_keys = per_construct_keys;
+  // The launcher consumes a clone, so the keys/metadata must travel with the code: dropping the key would silently
+  // demote the cubin disk cache to the LLVM-text-hash fallback, and dropping the metadata would make a cached
+  // artifact unlaunchable.
+  result.per_construct_artifacts.reserve(per_construct_artifacts.size());
+  for (auto &a : per_construct_artifacts) {
+    PerConstructArtifact c;
+    c.module = a.module ? llvm::CloneModule(*a.module) : nullptr;
+    c.cubin = a.cubin;
+    c.key = a.key;
+    c.tasks = a.tasks;
+    c.used_tree_ids = a.used_tree_ids;
+    c.struct_for_tls_sizes = a.struct_for_tls_sizes;
+    result.per_construct_artifacts.push_back(std::move(c));
+  }
   result.per_task_cache_stats = per_task_cache_stats;
   return result;
 }

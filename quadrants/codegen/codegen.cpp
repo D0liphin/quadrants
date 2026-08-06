@@ -7,6 +7,7 @@
 #if defined(QD_WITH_LLVM)
 #include "quadrants/codegen/cpu/codegen_cpu.h"
 #include "quadrants/codegen/llvm/per_task_module_cache.h"
+#include "quadrants/codegen/llvm/per_task_artifact_cache.h"
 #include "quadrants/runtime/program_impls/llvm/llvm_program.h"
 #endif
 #if defined(QD_WITH_CUDA)
@@ -107,7 +108,24 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
   // A1 per-task cache keying needs the device caps; fetch once (cheap) so the per-task codegen cache is always active.
   const DeviceCapabilityConfig pertask_caps = prog->get_device_caps();
   auto &task_cache = get_llvm_program(kernel->program)->per_task_module_cache();
-  std::atomic<int> n_cache_hit{0}, n_recompiled{0};
+  std::atomic<int> n_cache_hit{0}, n_recompiled{0}, n_artifact_hit{0};
+
+  // §9.D Part B: cross-process per-task artifact cache. On a hit we skip this task's ENTIRE compilation -- CHI->LLVM
+  // codegen, link, optimize, PTX and ptxas -- and carry the cached cubin straight to the cuLink assembly, using the
+  // record's `OffloadedTask` metadata for launch/graph construction. Only meaningful on the per-task cuLink path
+  // (there is no whole-module LLVM module to build if some tasks are code-only), hence the QD_CULINK_PERTASK
+  // requirement. Gated for now so it can be A/B'd against the in-memory-only path.
+  static const bool artifact_cache_on = []() {
+    const char *e = std::getenv("QD_PERTASK_ARTIFACT_CACHE");
+    return e != nullptr && std::string(e) == "1";
+  }();
+  static const bool culink_pertask = []() {
+    const char *e = std::getenv("QD_CULINK_PERTASK");
+    return e != nullptr && std::string(e) == "1";
+  }();
+  const bool use_artifact_cache = artifact_cache_on && culink_pertask;
+  const PerTaskArtifactCache artifact_cache(pertask_artifact_dir_for(compile_config_.offline_cache_file_path));
+  std::vector<std::vector<char>> artifact_cubins(offloads.size());
   for (int i = 0; i < offloads.size(); i++) {
     auto compile_func = [&, i] {
       tlctx_.fetch_this_thread_struct_module();
@@ -126,6 +144,22 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
           get_hashed_per_task_cache_key(compile_config_, pertask_caps, offload->as<OffloadedStmt>(), kernel);
       const std::string cache_key = key + "#" + std::to_string(i);
       pertask_keys[i] = cache_key;
+
+      // Cross-process artifact hit: this exact task was fully compiled by an earlier process. Reconstruct the
+      // metadata-only `LLVMCompiledTask` (module stays null -- there is no LLVM for it in this process) and keep the
+      // cubin for the cuLink assembly. Nothing below this point runs for the task.
+      if (use_artifact_cache) {
+        PerTaskArtifact rec;
+        if (artifact_cache.try_load(cache_key, &rec)) {
+          data[i] = std::make_unique<LLVMCompiledTask>(
+              rec.tasks, nullptr,
+              std::unordered_set<int>(rec.used_tree_ids.begin(), rec.used_tree_ids.end()),
+              std::unordered_set<int>(rec.struct_for_tls_sizes.begin(), rec.struct_for_tls_sizes.end()));
+          artifact_cubins[i] = std::move(rec.cubin);
+          n_artifact_hit.fetch_add(1, std::memory_order_relaxed);
+          return;
+        }
+      }
 
       // Autodiff tasks register per-task AdStack sizing into the program-scoped adstack cache as a compile-time side
       // effect keyed on {kernel_name, task_codegen_id}; a cross-kernel cache hit would skip that registration, so keep
@@ -313,39 +347,72 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
     }
   }
 
-  // Per-construct-cubin path (QD_CULINK_PERTASK=1, migration D/E WIP): build a self-contained module per offloaded task
-  // (link its runtime deps + optimize) BEFORE the whole-module link consumes `data`. These flow to the CUDA JIT, which
-  // emits a relocatable cubin per module and `cuLink`s them. Kept alongside the normal whole-module `module` so the
-  // rest of the pipeline (offline cache, tasks metadata) is unchanged; the JIT chooses the path.
-  static const bool culink_pertask = []() {
-    const char *e = std::getenv("QD_CULINK_PERTASK");
-    return e != nullptr && std::string(e) == "1";
-  }();
-  std::vector<std::unique_ptr<llvm::Module>> per_construct_modules;
-  std::vector<std::string> per_construct_keys;
+  // Per-task cuLink path (QD_CULINK_PERTASK=1, §9.D): produce one artifact per offloaded task -- either a
+  // self-contained module (link its runtime deps + optimize) built here BEFORE the whole-module link consumes
+  // `data`, or a cubin already loaded from the cross-process artifact cache above. These flow to the CUDA JIT, which
+  // compiles the former, persists complete records, and `cuLink`s everything into one CUmodule.
+  std::vector<PerConstructArtifact> per_construct_artifacts;
   auto t_pc0 = _pt_now();
   if (culink_pertask) {
     for (int i = 0; i < (int)data.size(); i++) {
-      if (!data[i] || !data[i]->module)
+      if (!data[i])
         continue;
-      std::vector<std::unique_ptr<LLVMCompiledTask>> one;
-      one.push_back(std::make_unique<LLVMCompiledTask>(data[i]->clone()));
-      auto linked_one = tlctx_.link_compiled_tasks(std::move(one));
-      optimize_module(linked_one.module.get());
-      per_construct_modules.push_back(std::move(linked_one.module));
-      // Keep parallel with the module vector (note the `continue` above skips empty tasks, so index i is not usable
-      // as the cubin-cache slot). The cubin cache keys on this task IR key, not the module's LLVM text.
-      per_construct_keys.push_back(pertask_keys[i]);
+      PerConstructArtifact art;
+      art.key = pertask_keys[i];
+      if (!artifact_cubins[i].empty()) {
+        // Artifact-cache hit: no module exists in this process. The metadata came out of the cached record, so the
+        // task is fully described without any codegen having run.
+        art.cubin = std::move(artifact_cubins[i]);
+        art.tasks = data[i]->tasks;
+      } else {
+        if (!data[i]->module)
+          continue;
+        std::vector<std::unique_ptr<LLVMCompiledTask>> one;
+        one.push_back(std::make_unique<LLVMCompiledTask>(data[i]->clone()));
+        auto linked_one = tlctx_.link_compiled_tasks(std::move(one));
+        optimize_module(linked_one.module.get());
+        art.module = std::move(linked_one.module);
+        // Carry the launch/graph metadata down to the JIT so it can persist a complete `PerTaskArtifact` (the cubin
+        // alone cannot be launched).
+        art.tasks = linked_one.tasks;
+      }
+      // Sorted for deterministic on-disk bytes (these are unordered_sets upstream).
+      art.used_tree_ids.assign(data[i]->used_tree_ids.begin(), data[i]->used_tree_ids.end());
+      art.struct_for_tls_sizes.assign(data[i]->struct_for_tls_sizes.begin(), data[i]->struct_for_tls_sizes.end());
+      std::sort(art.used_tree_ids.begin(), art.used_tree_ids.end());
+      std::sort(art.struct_for_tls_sizes.begin(), art.struct_for_tls_sizes.end());
+      per_construct_artifacts.push_back(std::move(art));
     }
   }
+  // §9.D Part B/B.3: if any task came from the cross-process artifact cache it has no LLVM module in this process, so
+  // the whole-module link is both impossible and unnecessary -- the cuLink path assembles the CUmodule from per-task
+  // cubins instead. Skipping it also removes the prototype's "double build" (link+optimize once per task AND once for
+  // the whole kernel). The kernel-level `tasks` list still has to be the in-order concatenation of every task's
+  // metadata, because the launcher and the CUDA graph builder are driven by it.
+  const bool code_only_tasks =
+      std::any_of(data.begin(), data.end(), [](const auto &d) { return d && !d->module; });
   auto t_link0 = _pt_now();
-  auto llvm_compiled_kernel = tlctx_.link_compiled_tasks(std::move(data));
-  auto t_opt0 = _pt_now();
-  optimize_module(llvm_compiled_kernel.module.get());
+  LLVMCompiledKernel llvm_compiled_kernel;
+  auto t_opt0 = t_link0;
+  if (code_only_tasks) {
+    for (auto &d : data) {
+      if (!d)
+        continue;
+      for (auto &t : d->tasks)
+        llvm_compiled_kernel.tasks.push_back(t);
+    }
+    t_opt0 = _pt_now();
+  } else {
+    llvm_compiled_kernel = tlctx_.link_compiled_tasks(std::move(data));
+    t_opt0 = _pt_now();
+    optimize_module(llvm_compiled_kernel.module.get());
+  }
   auto t_end = _pt_now();
-  llvm_compiled_kernel.per_construct_modules = std::move(per_construct_modules);
-  llvm_compiled_kernel.per_construct_keys = std::move(per_construct_keys);
-  llvm_compiled_kernel.per_task_cache_stats = {(int)offloads.size(), n_cache_hit.load(), n_recompiled.load()};
+  llvm_compiled_kernel.per_construct_artifacts = std::move(per_construct_artifacts);
+  // Artifact-cache hits are counted as cache hits for observation purposes: from the caller's point of view the task
+  // was reused rather than recompiled (it just came from disk rather than from this process's memory).
+  llvm_compiled_kernel.per_task_cache_stats = {(int)offloads.size(),
+                                               n_cache_hit.load() + n_artifact_hit.load(), n_recompiled.load()};
   // If the per-construct frontend split ran for this kernel (§9.C), surface its cache stats alongside the per-task
   // ones. Recorded by `split_frontend_per_construct` on the program-scoped construct cache, keyed by kernel name.
   {
@@ -360,10 +427,11 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
   }
   if (phase_time) {
     QD_INFO(
-        "[phase-time] kernel={} n_tasks={} pertask_compile={:.1f}ms per_construct_selfcontained={:.1f}ms(n={}) "
-        "link={:.1f}ms optimize={:.1f}ms",
-        kernel->get_name(), (int)offloads.size(), _pt_ms(t_pertask0, t_pc0), _pt_ms(t_pc0, t_link0),
-        (int)llvm_compiled_kernel.per_construct_modules.size(), _pt_ms(t_link0, t_opt0), _pt_ms(t_opt0, t_end));
+        "[phase-time] kernel={} n_tasks={} artifact_cache_hit={} pertask_compile={:.1f}ms "
+        "per_construct_selfcontained={:.1f}ms(n={}) link={:.1f}ms optimize={:.1f}ms whole_module_link={}",
+        kernel->get_name(), (int)offloads.size(), n_artifact_hit.load(), _pt_ms(t_pertask0, t_pc0),
+        _pt_ms(t_pc0, t_link0), (int)llvm_compiled_kernel.per_construct_artifacts.size(), _pt_ms(t_link0, t_opt0),
+        _pt_ms(t_opt0, t_end), code_only_tasks ? "skipped" : "yes");
   }
   return llvm_compiled_kernel;
 }

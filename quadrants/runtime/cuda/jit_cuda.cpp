@@ -7,6 +7,7 @@
 #include "quadrants/runtime/cuda/jit_cuda.h"
 #include "quadrants/runtime/llvm/llvm_context.h"
 #include "quadrants/codegen/ir_dump.h"
+#include "quadrants/codegen/llvm/per_task_artifact_cache.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Transforms/Scalar/LoopStrengthReduce.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
@@ -365,9 +366,7 @@ std::vector<char> JITSessionCUDA::get_or_build_construct_cubin(std::unique_ptr<l
   return cubin;
 }
 
-JITModule *JITSessionCUDA::add_module_culink(std::vector<std::unique_ptr<llvm::Module>> modules,
-                                             std::vector<std::string> keys,
-                                             int max_reg) {
+JITModule *JITSessionCUDA::add_module_culink(std::vector<PerConstructArtifact> artifacts, int max_reg) {
   // Per-construct-cubin path (migration D/E, WIP, slice 1a): emit PTX per self-contained sub-module and assemble one
   // CUmodule by device-linking them via cuLink. This slice feeds PTX inputs (driver ptxas each, no relocatable-cubin
   // cache yet) to validate the multi-input cuLink + multi-entry launch-by-name path in-tree. Slice 1b swaps PTX inputs
@@ -385,19 +384,38 @@ JITModule *JITSessionCUDA::add_module_culink(std::vector<std::unique_ptr<llvm::M
     return e != nullptr && std::string(e) == "1";
   }();
 
-  std::vector<std::string> ptxs;   // slice 1a path
+  std::vector<std::string> ptxs;          // slice 1a path
   std::vector<std::vector<char>> cubins;  // slice 1b path
   auto t_ptx0 = Time::get_time();
+  int n_prebuilt = 0;
   if (use_cubin) {
-    // `keys` is parallel to `modules` when the codegen driver supplied per-task IR keys; an empty/short vector falls
-    // back to the LLVM-text hash inside get_or_build_construct_cubin.
-    QD_ASSERT(keys.empty() || keys.size() == modules.size());
-    for (std::size_t i = 0; i < modules.size(); i++)
-      cubins.push_back(get_or_build_construct_cubin(modules[i], keys.empty() ? std::string() : keys[i]));
+    for (auto &art : artifacts) {
+      if (!art.cubin.empty()) {
+        // Already resolved from the on-disk artifact cache by the codegen driver: no module was ever built for this
+        // task, so there is nothing to compile or store.
+        cubins.push_back(art.cubin);
+        n_prebuilt++;
+        continue;
+      }
+      auto cubin = get_or_build_construct_cubin(art.module, art.key);
+      // Persist the COMPLETE record (code + launch metadata). The JIT is the only component that holds the cubin,
+      // and codegen is the only one that holds the metadata, so the metadata is carried down here on the artifact
+      // specifically so this side can write a record that is sufficient to launch the task without any recompile.
+      if (!art.key.empty()) {
+        PerTaskArtifactCache cache(pertask_artifact_dir_for(config_.offline_cache_file_path));
+        PerTaskArtifact rec;
+        rec.tasks = art.tasks;
+        rec.used_tree_ids = art.used_tree_ids;
+        rec.struct_for_tls_sizes = art.struct_for_tls_sizes;
+        rec.cubin = cubin;
+        cache.store(art.key, rec);
+      }
+      cubins.push_back(std::move(cubin));
+    }
   } else {
-    ptxs.reserve(modules.size());
-    for (auto &m : modules)
-      ptxs.push_back(compile_module_to_ptx(m));
+    ptxs.reserve(artifacts.size());
+    for (auto &art : artifacts)
+      ptxs.push_back(compile_module_to_ptx(art.module));
   }
   auto t_ptx1 = Time::get_time();
 
@@ -444,8 +462,11 @@ JITModule *JITSessionCUDA::add_module_culink(std::vector<std::unique_ptr<llvm::M
     return e != nullptr && std::string(e) == "1";
   }();
   if (phase_time) {
-    QD_INFO("[phase-time] culink-pertask mode={} n_modules={} cubin_build_all={:.1f}ms linked_cubin={:.1f}KB",
-            use_cubin ? "cubin-cache" : "ptx", (int)modules.size(), (t_ptx1 - t_ptx0) * 1000, cubin_sz / 1024.0);
+    QD_INFO(
+        "[phase-time] culink-pertask mode={} n_tasks={} prebuilt_from_artifact_cache={} cubin_build_all={:.1f}ms "
+        "linked_cubin={:.1f}KB",
+        use_cubin ? "cubin-cache" : "ptx", (int)artifacts.size(), n_prebuilt, (t_ptx1 - t_ptx0) * 1000,
+        cubin_sz / 1024.0);
   }
 
   this->modules.push_back(std::make_unique<JITModuleCUDA>(cuda_module));

@@ -202,19 +202,31 @@ struct LLVMCompiledTask {
   QD_IO_DEF(tasks);
 };
 
+// One entry of the per-task cuLink path: the device code for a single offloaded task, plus everything the launcher /
+// CUDA graph builder needs for it. Exactly one of `module` (still to be compiled) and `cubin` (already compiled,
+// loaded from the `PerTaskArtifactCache`) is populated; the JIT compiles the former and device-links both together.
+//
+// `key` is the per-task IR key (`get_hashed_per_task_cache_key` + "#index"), computed from the task IR *before*
+// codegen -- it keys the on-disk artifact cache, so an unchanged task hits it on a warm edit even though the
+// whole-kernel LLVM text moved. The metadata fields ride along because the JIT is the component that ends up holding
+// the freshly built cubin, so it is the one that writes the complete `PerTaskArtifact` record.
+struct PerConstructArtifact {
+  std::unique_ptr<llvm::Module> module{nullptr};
+  std::vector<char> cubin;
+  std::string key;
+  std::vector<OffloadedTask> tasks;
+  std::vector<int> used_tree_ids;
+  std::vector<int> struct_for_tls_sizes;
+};
+
 struct LLVMCompiledKernel {
   std::vector<OffloadedTask> tasks;
   std::unique_ptr<llvm::Module> module{nullptr};
-  // Per-construct (currently per-task) self-contained modules for the relocatable-cubin + cuLink relink path
-  // (migration D/E, WIP). Populated only under QD_CULINK_PERTASK; empty => the JIT uses the whole-module `module`.
-  // Not serialized (prototype): a cache reload falls back to the whole-module path.
-  std::vector<std::unique_ptr<llvm::Module>> per_construct_modules;
-  // Parallel to `per_construct_modules`: the per-task IR cache key (`get_hashed_per_task_cache_key` + "#index") for
-  // each sub-module. This is what the relocatable-cubin disk cache is keyed by (§9.D Part B) -- NOT the module's
-  // LLVM-IR text hash, which was the slice-1b prototype key. The IR key is computed from the *task IR* before codegen,
-  // so it is stable across LLVM-text churn and is the key an unchanged task must hit on a warm edit. Transient, like
-  // `per_construct_modules`.
-  std::vector<std::string> per_construct_keys;
+  // Per-task self-contained artifacts for the relocatable-cubin + cuLink relink path (§9.D). Populated only under
+  // QD_CULINK_PERTASK; empty => the JIT uses the whole-module `module`. Transient (not part of QD_IO_DEF): the
+  // cross-process persistence for these lives in the `PerTaskArtifactCache` on disk, keyed by each entry's `key`,
+  // not in the whole-kernel `.qdc` blob.
+  std::vector<PerConstructArtifact> per_construct_artifacts;
   // Per-task compile-cache stats for the compile that produced this kernel (transient, not serialized). Set by the
   // codegen driver; surfaced host-side via `LLVM::CompiledKernelData::get_per_task_cache_stats`.
   PerTaskCacheStats per_task_cache_stats;

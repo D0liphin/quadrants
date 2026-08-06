@@ -6,6 +6,7 @@
 #include "quadrants/runtime/llvm/llvm_fwd.h"
 #include "quadrants/util/lang_util.h"
 #include "quadrants/jit/jit_module.h"
+#include "quadrants/codegen/llvm/llvm_compiled_data.h"  // PerConstructArtifact (per-task cuLink path)
 
 namespace quadrants::lang {
 
@@ -30,11 +31,9 @@ class JITSession {
   // Per-construct-cubin path (migration D/E, WIP): assemble one JIT module from several self-contained sub-modules by
   // emitting a relocatable cubin per sub-module and device-linking them (`cuLink`). Only the CUDA backend implements
   // this; the default errors so other backends are unaffected.
-  // `keys` is parallel to `modules`: the per-task IR cache key for each sub-module, used to key the relocatable-cubin
-  // disk cache (§9.D Part B). May be empty, in which case the backend falls back to hashing the module's LLVM text.
-  virtual JITModule *add_module_culink(std::vector<std::unique_ptr<llvm::Module>> modules,
-                                       std::vector<std::string> keys,
-                                       int max_reg = 0) {
+  // Each artifact is one offloaded task: either a module to compile or a cubin already loaded from the on-disk
+  // per-task artifact cache, plus its IR key and launch metadata (§9.D Part B).
+  virtual JITModule *add_module_culink(std::vector<PerConstructArtifact> artifacts, int max_reg = 0) {
     QD_NOT_IMPLEMENTED
   }
 
