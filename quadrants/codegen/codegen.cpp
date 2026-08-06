@@ -126,9 +126,46 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
   const bool use_artifact_cache = artifact_cache_on && culink_pertask;
   const PerTaskArtifactCache artifact_cache(pertask_artifact_dir_for(compile_config_.offline_cache_file_path));
   std::vector<std::vector<char>> artifact_cubins(offloads.size());
+
+  // §9.D Part A2: the frontend split may have replaced whole constructs with placeholder tasks, having found a
+  // manifest naming their already-compiled artifacts. Those tasks must not be keyed or lowered at all -- their IR is
+  // an empty stub. Also carries, per task, which construct produced it so we can record manifests below.
+  ConstructDiskPlan disk_plan;
+  if (kernel->program != nullptr) {
+    auto &cc_plan = kernel->program->per_construct_cache();
+    std::lock_guard<std::mutex> g(cc_plan.mu);
+    auto it = cc_plan.disk_plans.find(kernel->get_name());
+    if (it != cc_plan.disk_plans.end()) {
+      disk_plan = it->second;
+    }
+  }
+  auto placeholder_key = [&disk_plan](int i) -> std::string {
+    return (i < (int)disk_plan.artifact_key_by_task.size()) ? disk_plan.artifact_key_by_task[i] : std::string();
+  };
   for (int i = 0; i < offloads.size(); i++) {
     auto compile_func = [&, i] {
       tlctx_.fetch_this_thread_struct_module();
+
+      // §9.D Part A2 placeholder: the split already resolved this task to a compiled artifact via a construct
+      // manifest. Load it and skip everything -- no clone, no key, no lowering. This is what removes the whole-kernel
+      // frontend cost for unchanged constructs, since their IR was never produced in this process.
+      if (const std::string pkey = placeholder_key(i); !pkey.empty()) {
+        PerTaskArtifact rec;
+        if (artifact_cache.try_load(pkey, &rec)) {
+          data[i] = std::make_unique<LLVMCompiledTask>(
+              rec.tasks, nullptr, std::unordered_set<int>(rec.used_tree_ids.begin(), rec.used_tree_ids.end()),
+              std::unordered_set<int>(rec.struct_for_tls_sizes.begin(), rec.struct_for_tls_sizes.end()));
+          artifact_cubins[i] = std::move(rec.cubin);
+          pertask_keys[i] = pkey;
+          n_artifact_hit.fetch_add(1, std::memory_order_relaxed);
+          return;
+        }
+        // Manifest named an artifact that is gone (evicted/corrupt). We cannot recover here -- the placeholder has no
+        // real IR to lower -- so fail loudly rather than emit a kernel with a missing task.
+        QD_ERROR("per-construct manifest referenced missing artifact {} (kernel {} task {})", pkey, kernel->get_name(),
+                 i);
+      }
+
       auto offload = irpass::analysis::clone(offloads[i].get());
       irpass::re_id(offload.get());
 
@@ -337,6 +374,28 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
           "[selfcontained-probe] kernel={} largest_task_idx={} pretask_instrs={} link_ms={:.1f} optimize_ms={:.1f} "
           "post_link: remaining_external_decls(non-intrinsic)={} nonlocal_defs_besides_entry={} entry_defs={}",
           kernel->get_name(), imax, best, _ms(_t0, _t1), _ms(_t1, _t2), remaining_decls, nonlocal_defs, entry_defs);
+    }
+  }
+
+  // §9.D Part A2: record, per construct, the ordered per-task artifact keys it produced, so the next process can skip
+  // that construct's frontend entirely. Only now are the keys known -- they embed the task's index in the reassembled
+  // kernel. Constructs that were themselves manifest hits are skipped (their manifest already exists and is correct).
+  if (use_artifact_cache && !disk_plan.construct_key_by_task.empty()) {
+    const ConstructManifestCache manifests(construct_manifest_dir_for(compile_config_.offline_cache_file_path));
+    std::vector<std::string> order;
+    std::unordered_map<std::string, std::vector<std::string>> by_construct;
+    for (int i = 0; i < (int)pertask_keys.size() && i < (int)disk_plan.construct_key_by_task.size(); i++) {
+      const auto &ck = disk_plan.construct_key_by_task[i];
+      if (ck.empty() || !placeholder_key(i).empty())
+        continue;
+      if (!by_construct.count(ck))
+        order.push_back(ck);
+      by_construct[ck].push_back(pertask_keys[i]);
+    }
+    for (const auto &ck : order) {
+      ConstructManifest m;
+      m.task_keys = by_construct[ck];
+      manifests.store(ck, m);
     }
   }
 

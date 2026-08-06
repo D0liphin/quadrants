@@ -673,8 +673,25 @@ void split_frontend_per_construct(IRNode *ir, const CompileConfig &config, const
   PerConstructCache *cc =
       (construct_cache_on && kernel->program != nullptr) ? &kernel->program->per_construct_cache() : nullptr;
 
+  // §9.D Part A2 cross-process construct manifests. Enabled with QD_CONSTRUCT_MANIFEST=1 (and only meaningful
+  // alongside the per-task artifact cache, which holds the compiled tasks the manifests name).
+  static const bool manifest_on = []() {
+    const char *e = std::getenv("QD_CONSTRUCT_MANIFEST");
+    return e != nullptr && std::string(e) == "1";
+  }();
+  std::unique_ptr<ConstructManifestCache> manifest_store;
+  if (manifest_on && kernel->program != nullptr) {
+    manifest_store =
+        std::make_unique<ConstructManifestCache>(construct_manifest_dir_for(config.offline_cache_file_path));
+  }
+  ConstructManifestCache *manifests = manifest_store.get();
+  const DeviceCapabilityConfig dev_caps =
+      (manifests != nullptr) ? kernel->program->get_device_caps() : DeviceCapabilityConfig{};
+  std::vector<std::string> plan_construct_keys, plan_artifact_keys;  // parallel to `tasks`
+  std::unordered_map<int, std::string> pending_manifest_key;         // construct ordinal -> cross-process key
+
   std::vector<std::unique_ptr<Stmt>> tasks;
-  int n_constructs = 0, n_hit = 0, n_recompiled = 0;
+  int n_constructs = 0, n_hit = 0, n_recompiled = 0, n_manifest_hit = 0;
   double key_ms = 0.0, fe_ms = 0.0;  // diagnostic: time in construct-key vs the (cached-out) frontend
   auto _now = []() { return std::chrono::steady_clock::now(); };
   auto _ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
@@ -730,11 +747,61 @@ void split_frontend_per_construct(IRNode *ir, const CompileConfig &config, const
     // run_construct_frontend on a miss runs OUTSIDE the cache lock so parallel kernel compiles never serialize on it.
     bool hit = false;
     std::string ckey;
-    if (cc != nullptr) {
+    if (cc != nullptr || manifests != nullptr) {
       irpass::re_id(cb);
       auto _k0 = _now();
       ckey = get_hashed_per_construct_cache_key(config, cb, kernel);
       key_ms += _ms(_k0, _now());
+    }
+
+    // §9.D Part A2: cross-process manifest. If a previous process already compiled this exact construct, it recorded
+    // the ordered per-task artifact keys it produced. Reusing them lets us skip this construct's ENTIRE frontend
+    // (merge_global_ptrs / full_simplify / offload) and its codegen: we emit one placeholder task per key and the
+    // codegen driver loads the artifacts directly. This is the only path that removes the ~11 s whole-kernel
+    // merge_global_ptrs on a warm edit.
+    if (manifests != nullptr) {
+      auto _k0 = _now();
+      const std::string dkey = get_hashed_per_construct_disk_key(config, dev_caps, cb, kernel);
+      key_ms += _ms(_k0, _now());
+      ConstructManifest man;
+      if (manifests->try_load(dkey, &man) && !man.task_keys.empty()) {
+        // The keys embed each task's index in the kernel (`...#<i>`), and that index is baked into the compiled
+        // entry-fn / shared-array / adstack-counter names. Reuse is only valid if this construct lands at the same
+        // offset, so verify before committing; a shift (an edit changed some earlier construct's task count) is a
+        // miss and we just recompile.
+        const int base = (int)tasks.size();
+        bool aligned = true;
+        for (int t = 0; t < (int)man.task_keys.size(); t++) {
+          const auto &kk = man.task_keys[t];
+          const auto pos = kk.rfind('#');
+          if (pos == std::string::npos || kk.substr(pos + 1) != std::to_string(base + t)) {
+            aligned = false;
+            break;
+          }
+        }
+        if (aligned) {
+          for (int t = 0; t < (int)man.task_keys.size(); t++) {
+            // Placeholder: an empty serial task purely to hold the slot. It is never lowered -- codegen sees the
+            // artifact key recorded for this index and loads the compiled task instead.
+            auto ph = std::make_unique<OffloadedStmt>(OffloadedStmt::TaskType::serial, config.arch,
+                                                      const_cast<Kernel *>(kernel));
+            tasks.push_back(std::move(ph));
+            plan_construct_keys.push_back(dkey);
+            plan_artifact_keys.push_back(man.task_keys[t]);
+          }
+          n_manifest_hit++;
+          if (split_trace())
+            QD_INFO("[split-trace] {}: construct #{} (seg {}) MANIFEST HIT dkey={} n_tasks={}", kernel->get_name(),
+                    n_constructs, k, dkey, (int)man.task_keys.size());
+          continue;
+        }
+        if (split_trace())
+          QD_INFO("[split-trace] {}: construct #{} manifest index-shift -> miss", kernel->get_name(), n_constructs);
+      }
+      pending_manifest_key[n_constructs] = dkey;  // record so codegen can write the manifest after keying its tasks
+    }
+
+    if (cc != nullptr) {
       std::lock_guard<std::mutex> g(cc->mu);
       auto it = cc->entries.find(ckey);
       if (it != cc->entries.end()) {
@@ -748,6 +815,12 @@ void split_frontend_per_construct(IRNode *ir, const CompileConfig &config, const
       if (split_trace())
         QD_INFO("[split-trace] {}: construct #{} (seg {}) cache HIT ckey={}", kernel->get_name(), n_constructs, k,
                 ckey);
+      // Even on an in-memory hit these tasks belong to this construct, so tag them for the manifest write.
+      for (size_t t = plan_construct_keys.size(); t < tasks.size(); t++) {
+        plan_construct_keys.push_back(pending_manifest_key.count(n_constructs) ? pending_manifest_key[n_constructs]
+                                                                              : std::string());
+        plan_artifact_keys.push_back(std::string());
+      }
       continue;
     }
 
@@ -768,6 +841,12 @@ void split_frontend_per_construct(IRNode *ir, const CompileConfig &config, const
     }
     for (auto &t : produced)
       tasks.push_back(std::move(t));
+    // Tag the freshly produced tasks with this construct so codegen can record its manifest once it has keyed them.
+    for (size_t t = plan_construct_keys.size(); t < tasks.size(); t++) {
+      plan_construct_keys.push_back(pending_manifest_key.count(n_constructs) ? pending_manifest_key[n_constructs]
+                                                                            : std::string());
+      plan_artifact_keys.push_back(std::string());
+    }
   }
   while (!block->statements.empty())
     block->extract(0);
@@ -776,16 +855,23 @@ void split_frontend_per_construct(IRNode *ir, const CompileConfig &config, const
   if (cc != nullptr) {
     std::lock_guard<std::mutex> g(cc->mu);
     cc->last_stats[kernel->get_name()] = {n_constructs, n_hit, n_recompiled};
+    if (manifests != nullptr) {
+      ConstructDiskPlan plan;
+      plan.construct_key_by_task = std::move(plan_construct_keys);
+      plan.artifact_key_by_task = std::move(plan_artifact_keys);
+      cc->disk_plans[kernel->get_name()] = std::move(plan);
+    }
   }
   static const bool split_log = []() {
     const char *e = std::getenv("QD_SPLIT_LOG");
     return e != nullptr && std::string(e) == "1";
   }();
-  if (split_log)
-    QD_INFO(
-        "[split-frontend] kernel={} top_level_stmts={} constructs_compiled={} constructs_cache_hit={} "
-        "constructs_recompiled={} tasks_produced={} key_ms={:.1f} frontend_ms={:.1f}",
-        kernel->get_name(), n, n_constructs, n_hit, n_recompiled, (int)block->statements.size(), key_ms, fe_ms);
+    if (split_log)
+      QD_INFO(
+          "[split-frontend] kernel={} top_level_stmts={} constructs_compiled={} constructs_cache_hit={} "
+          "constructs_manifest_hit={} constructs_recompiled={} tasks_produced={} key_ms={:.1f} frontend_ms={:.1f}",
+          kernel->get_name(), n, n_constructs, n_hit, n_manifest_hit, n_recompiled, (int)block->statements.size(),
+          key_ms, fe_ms);
 }
 }  // namespace
 
