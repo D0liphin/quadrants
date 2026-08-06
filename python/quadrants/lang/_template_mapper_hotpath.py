@@ -38,7 +38,7 @@ from quadrants._tensor import (
 )
 from quadrants._tensor_wrapper import _TENSOR_WRAPPER_TYPES
 from quadrants._tensor_wrapper import Tensor as _TensorClass
-from quadrants.lang._dataclass_util import create_flat_name, is_final_annotation
+from quadrants.lang._dataclass_util import create_flat_name, final_field_names
 from quadrants.lang._ndarray import Ndarray
 from quadrants.lang.any_array import AnyArray
 from quadrants.lang.buffer_view import BufferView as BufferViewInstance
@@ -397,25 +397,46 @@ def _extract_arg(raise_on_templated_floats: bool, arg: Any, annotation: Annotati
                 return arg._key
             except AttributeError:
                 pass
-        # POC (PR-A): ``typing.Final[T]`` field => bake the actual value directly into the spec key so distinct
-        # values compile distinct kernels. Non-Final fields keep the current behavior (recursive ``_extract_arg``,
-        # which for plain primitive types returns the ``"#"`` placeholder and thus does not participate in
-        # templatisation). The per-instance ``_key`` cache above short-circuits both paths for frozen dataclasses,
-        # so this extra ``is_final_annotation`` check runs at most once per (instance, kernel) lifetime.
-        key = tuple(
-            [
-                getattr(arg, field.name)
-                if is_final_annotation(field.type)
-                else _extract_arg(
-                    raise_on_templated_floats,
-                    getattr(arg, field.name),
-                    field.type,
-                    create_flat_name(arg_name, field.name),
-                )
-                for field in annotation_fields.values()
-                if field._field_type is _FIELD
-            ]
-        )
+        # ``typing.Final[T]`` fields are baked into the compiled kernel as compile-time constants, so their *values*
+        # must drive the spec key (distinct values => distinct kernels). Non-Final fields keep the existing behavior:
+        # recursive ``_extract_arg``, which for plain primitive types returns the ``"#"`` placeholder and so does not
+        # participate in templatisation.
+        #
+        # PERF: ``final_field_names`` is a single ``dict.get`` keyed on the dataclass type (validated + computed once
+        # per type, never per launch). When it is empty - every dataclass that does not use the feature, i.e. all
+        # pre-existing code - we take the original comprehension verbatim, so this costs one dict lookup and nothing
+        # else. Frozen dataclasses short-circuit even that via the ``arg._key`` cache above.
+        final_names = final_field_names(annotation)
+        if final_names:
+            key = tuple(
+                [
+                    (
+                        getattr(arg, field.name)
+                        if field.name in final_names
+                        else _extract_arg(
+                            raise_on_templated_floats,
+                            getattr(arg, field.name),
+                            field.type,
+                            create_flat_name(arg_name, field.name),
+                        )
+                    )
+                    for field in annotation_fields.values()
+                    if field._field_type is _FIELD
+                ]
+            )
+        else:
+            key = tuple(
+                [
+                    _extract_arg(
+                        raise_on_templated_floats,
+                        getattr(arg, field.name),
+                        field.type,
+                        create_flat_name(arg_name, field.name),
+                    )
+                    for field in annotation_fields.values()
+                    if field._field_type is _FIELD
+                ]
+            )
         if is_frozen:
             try:
                 object.__setattr__(arg, "_key", key)

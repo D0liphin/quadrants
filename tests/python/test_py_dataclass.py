@@ -3247,7 +3247,7 @@ def test_typed_dataclass_does_not_emit_deprecation_warning():
 # Design goal (see perso_hugh/doc/final_dataclass_templates.md): let users mark selected fields of a plain frozen
 # ``@dataclasses.dataclass`` config as ``typing.Final[T]`` to signal that the field's value must be baked as a
 # compile-time constant. This replaces the pre-existing ``@qd.data_oriented`` + ``qd.Template`` pattern for static
-# configs — where the same effect required opting the whole class into the data_oriented machinery and paying the
+# configs - where the same effect required opting the whole class into the data_oriented machinery and paying the
 # associated per-launch overhead (see PR #705 discussion of ``_arg_disposition`` / ``TemplateMapper.lookup``).
 #
 # Semantics:
@@ -3455,3 +3455,183 @@ def test_final_field_with_ndarray_sibling():
     fill(State(n=5, buf=buf))
     for i in range(5):
         assert buf[i] == 5 - i
+
+
+@test_utils.test()
+def test_final_field_value_is_part_of_offline_fastcache_key(tmp_path: Path):
+    """A Final field's value must be part of the *offline* fastcache key, not just the in-process template mapper spec
+    key. Regression test for a soundness bug in the original implementation: because
+    ``args_hasher.dataclass_to_repr`` only appended a field's value to the cache key when
+    ``FIELD_METADATA_CACHE_VALUE`` metadata was set, a kernel compiled with ``offset=7`` baked in was loaded from the
+    offline cache in a later process for a config carrying ``offset=100``, silently returning 7.
+
+    Uses two separate ``qd.init`` cycles sharing one ``offline_cache_file_path`` so the second launch genuinely hits
+    the persisted cache - the same structure as ``test_prune_used_parameters_fastcache_dead_static_branch``."""
+    from typing import Final
+
+    @dataclass(frozen=True)
+    class Cfg:
+        offset: Final[int]
+
+    arch_name = qd.lang.impl.current_cfg().arch.name
+    for offset_value in (7, 100):
+        qd.init(arch=getattr(qd, arch_name), offline_cache_file_path=str(tmp_path), offline_cache=True)
+
+        @qd.kernel(fastcache=True)
+        def bump(config: Cfg, x: qd.types.NDArray[qd.i32, 1]):
+            v = qd.static(config.offset)
+            for i in x:
+                x[i] = v
+
+        x = qd.ndarray(qd.i32, shape=(3,))
+        bump(Cfg(offset=offset_value), x)
+        assert x[0] == offset_value, (
+            f"expected {offset_value}, got {x[0]} - a kernel with a different Final value was reused from the "
+            f"offline fastcache"
+        )
+
+
+@test_utils.test()
+def test_final_field_on_non_frozen_dataclass_is_rejected():
+    """A ``Final`` field's value is baked into compiled code, so its carrier must not be reassignable. A plain
+    ``@dataclasses.dataclass`` (``eq=True``, non-frozen) sets ``__hash__ = None`` and is rejected with an actionable
+    message. ``frozen=True`` and ``unsafe_hash=True`` are both accepted."""
+    from typing import Final
+
+    from quadrants.lang._dataclass_util import final_field_names
+
+    @dataclass  # not frozen
+    class Mutable:
+        x: Final[int]
+
+    with pytest.raises(TypeError, match="but is not frozen"):
+        final_field_names(Mutable)
+
+    @dataclass(frozen=True)
+    class Frozen:
+        x: Final[int]
+
+    assert final_field_names(Frozen) == {"x"}
+
+    @dataclass(unsafe_hash=True)
+    class UnsafeHash:
+        x: Final[int]
+
+    assert final_field_names(UnsafeHash) == {"x"}
+
+
+@test_utils.test()
+def test_final_field_rejects_non_bakeable_inner_types():
+    """``Final[T]`` only accepts a ``T`` that is meaningful as a compile-time literal and hashes / reprs by value
+    stably across processes: ``bool`` / ``int`` / ``float`` / ``str`` and ``enum.Enum`` subclasses. Arrays, structs,
+    nested dataclasses and arbitrary objects are rejected with a tailored remediation hint rather than silently
+    miscompiling."""
+    import enum
+    from typing import Final
+
+    from quadrants.lang._dataclass_util import final_field_names
+
+    @dataclass(frozen=True)
+    class Leaf:
+        a: Final[int]
+
+    @dataclass(frozen=True)
+    class FinalNestedDataclass:
+        inner: Final[Leaf]
+
+    with pytest.raises(TypeError, match="nested dataclasses are walked structurally"):
+        final_field_names(FinalNestedDataclass)
+
+    @dataclass(frozen=True)
+    class FinalNdarrayType:
+        buf: Final[qd.types.ndarray_type.NdarrayType]
+
+    with pytest.raises(TypeError, match="arrays are runtime data"):
+        final_field_names(FinalNdarrayType)
+
+    @dataclass(frozen=True)
+    class FinalTemplate:
+        x: Final[qd.Template]
+
+    with pytest.raises(TypeError, match="is redundant"):
+        final_field_names(FinalTemplate)
+
+    @dataclass(frozen=True)
+    class FinalObject:
+        x: Final[object]
+
+    with pytest.raises(TypeError, match="supports T in"):
+        final_field_names(FinalObject)
+
+    # Accepted: the scalar set plus any Enum subclass.
+    class Mode(enum.IntEnum):
+        A = 0
+        B = 1
+
+    @dataclass(frozen=True)
+    class AllGood:
+        a: Final[int]
+        b: Final[float]
+        c: Final[bool]
+        d: Final[str]
+        e: Final[Mode]
+        f: int  # ordinary runtime field
+
+    assert final_field_names(AllGood) == {"a", "b", "c", "d", "e"}
+
+
+@test_utils.test()
+def test_final_field_int_annotation_holding_intenum_value():
+    """Genesis's static-config classes declare ``ccd_algorithm: int`` / ``integrator: int`` etc. but store ``IntEnum``
+    members in them. Baking such a value must work: an ``IntEnum`` member is a valid literal, compares and does
+    arithmetic as an ``int``, and ``repr``s stably for the cache key. Validation is on the declared annotation, so
+    ``Final[int]`` holding an ``IntEnum`` is accepted without an ``isinstance`` check on the hot path."""
+    import enum
+    from typing import Final
+
+    class CcdAlgorithm(enum.IntEnum):
+        MPR = 0
+        MJ_MPR = 1
+        GJK = 2
+
+    @dataclass(frozen=True)
+    class StaticConfig:
+        ccd_algorithm: Final[int]
+        enable_collision: Final[bool]
+
+    @qd.kernel
+    def run(cfg: StaticConfig, out: qd.types.NDArray[qd.i32, 1]):
+        algo = qd.static(cfg.ccd_algorithm)
+        for i in out:
+            if qd.static(cfg.enable_collision):
+                out[i] = algo
+            else:
+                out[i] = -1
+
+    out = qd.ndarray(qd.i32, shape=(2,))
+    run(StaticConfig(ccd_algorithm=CcdAlgorithm.GJK, enable_collision=True), out)
+    assert out[0] == 2 and out[1] == 2
+    run(StaticConfig(ccd_algorithm=CcdAlgorithm.MPR, enable_collision=False), out)
+    assert out[0] == -1 and out[1] == -1
+
+
+@test_utils.test()
+def test_final_field_string_annotation_is_rejected():
+    """``from __future__ import annotations`` (or any explicit string annotation) leaves ``field.type`` as an
+    unresolved string, so Quadrants cannot see the ``Final`` and would silently lower the field as a *runtime* kernel
+    argument - a field the user believes is a compile-time constant. Rather than half-support it, raise."""
+    from quadrants.lang._dataclass_util import final_field_names
+
+    @dataclass(frozen=True)
+    class StringAnnotated:
+        x: "Final[int]"
+
+    with pytest.raises(TypeError, match="unresolved string"):
+        final_field_names(StringAnnotated)
+
+    # A non-Final string annotation stays on the pre-existing path (unchanged behavior, no error from us).
+    @dataclass(frozen=True)
+    class PlainStringAnnotated:
+        x: "int"
+
+    assert final_field_names(PlainStringAnnotated) == frozenset()

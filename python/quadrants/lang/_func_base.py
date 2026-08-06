@@ -34,7 +34,7 @@ from quadrants._lib.core.quadrants_python import KernelLaunchContext
 from quadrants._tensor_wrapper import _TENSOR_WRAPPER_TYPES
 from quadrants._tensor_wrapper import Tensor as _TensorClass
 from quadrants.lang import _kernel_impl_dataclass, impl
-from quadrants.lang._dataclass_util import create_flat_name, is_final_annotation
+from quadrants.lang._dataclass_util import create_flat_name, final_field_names
 from quadrants.lang._ndarray import Ndarray
 from quadrants.lang._signature import get_func_signature
 from quadrants.lang._wrap_inspect import get_source_info_and_src
@@ -123,16 +123,17 @@ def _get_frozen_dc_plan(
     # check so a stale plan from a different kernel specialization is never returned.
     if entry is not None and entry[0] is used_params:
         return entry[1]
+    # ``typing.Final[T]`` fields are baked as compile-time constants in the kernel body (see
+    # ``FunctionDefTransformer._transform_kernel_arg``) and folded into the template spec key (see ``_extract_arg``),
+    # so they own no runtime arg slot. Excluding them from the plan keeps the launch loop and the underlying kernel
+    # argument count consistent, and costs nothing per launch - the plan itself is already cached per
+    # (used_params, class, basename).
+    final_names = final_field_names(struct_cls)
     entries: list[tuple[str, str, Any]] = []
     for field in fields_dict.values():
         if field._field_type is not _FIELD:
             continue
-        # POC (PR-A): ``typing.Final[T]`` fields are baked as compile-time constants in the kernel body (see
-        # ``FunctionDefTransformer._transform_kernel_arg``) and folded into the template mapper spec key (see
-        # ``_extract_arg``), so they own no runtime arg slot. Skip them here so the launch loop and the underlying
-        # kernel argument count stay consistent. Filtering in the plan (rather than in the hot loop) keeps the
-        # per-launch launch loop identical to the non-Final case.
-        if is_final_annotation(field.type):
+        if field.name in final_names:
             continue
         full_name = create_flat_name(basename, field.name)
         if full_name not in used_params:
@@ -682,13 +683,13 @@ class FuncBase:
                     )
                     idx += num_args_
                 return idx, True
-            # Non-frozen dataclass: original path with full iteration and filtering.
+            # Non-frozen dataclass: original path with full iteration and filtering. No ``Final`` handling is needed
+            # here - ``final_field_names`` rejects ``Final`` fields on a class with ``__hash__ is None`` (the only way
+            # to reach this branch, since ``frozen=True`` and ``unsafe_hash=True`` both take the plan path above), and
+            # that validation has already run during template mapping by the time we get here.
             is_launch_ctx_cacheable = False
             for field in needed_arg_fields.values():
                 if field._field_type is not _FIELD:
-                    continue
-                # POC (PR-A): mirror the frozen-plan Final skip - Final fields carry no runtime arg slot.
-                if is_final_annotation(field.type):
                     continue
                 field_name = field.name
                 field_full_name = create_flat_name(py_dataclass_basename, field_name)

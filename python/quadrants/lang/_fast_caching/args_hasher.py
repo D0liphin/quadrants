@@ -11,6 +11,7 @@ from quadrants._tensor_wrapper import _TENSOR_WRAPPER_TYPES
 from quadrants._tensor_wrapper import Tensor as _TensorWrapper
 from quadrants.types.annotations import Template
 
+from .._dataclass_util import final_field_names
 from .._ndarray import ScalarNdarray
 from ..field import ScalarField
 from ..kernel_arguments import ArgMetadata
@@ -83,6 +84,17 @@ def dataclass_to_repr(raise_on_templated_floats: bool, path: tuple[str, ...], ar
             return None
         if cached is not None:
             return cached
+    # A ``typing.Final[T]`` field is baked into the compiled kernel as a compile-time constant (see
+    # ``FunctionDefTransformer._transform_kernel_arg``), so its *value* - not just its type - must be part of the cache
+    # key. Without this, a kernel compiled with ``offset=7`` baked in is loaded from the offline cache for a config
+    # carrying ``offset=100`` and silently produces the first config's results (regression test:
+    # ``test_final_field_value_is_part_of_offline_fastcache_key``). The in-process template mapper spec key already
+    # discriminates on the value; this covers the cross-process offline cache. Treated identically to an explicit
+    # ``FIELD_METADATA_CACHE_VALUE`` marker.
+    #
+    # PERF: one ``dict.get`` keyed on the dataclass type; empty for every dataclass not using the feature. The
+    # ``is_frozen`` repr cache above means this whole function runs once per instance anyway.
+    final_names = final_field_names(type(arg))
     repr_l = []
     for field in dataclasses.fields(arg):
         child_value = getattr(arg, field.name)
@@ -97,7 +109,7 @@ def dataclass_to_repr(raise_on_templated_floats: bool, path: tuple[str, ...], ar
                     pass
             return None
         full_repr = f"{field.name}: ({_repr})"
-        if field.metadata.get(FIELD_METADATA_CACHE_VALUE, False):
+        if field.name in final_names or field.metadata.get(FIELD_METADATA_CACHE_VALUE, False):
             full_repr += f" = {child_value}"
         repr_l.append(full_repr)
     result = "[" + ",".join(repr_l) + "]"

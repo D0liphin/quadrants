@@ -18,6 +18,7 @@ The following compound types are available:
 | `@qd.func` instance methods         | no                                    | yes                                   | yes                                 |
 | Member declaration                  | type-annotated class fields           | live attributes (no annotations)      | type-annotated class fields         |
 | Kernel-arg annotation               | `MyStruct` (the dataclass type)       | `qd.Template`                       | `MyStruct` (the struct type)        |
+| Primitive members are               | runtime args, or compile-time constants when annotated [`Final[T]`](#compile-time-constant-fields-typingfinal) | compile-time constants by default ([opt out](#runtime-primitives-template_primitivesfalse)) | fields of the in-kernel struct |
 
 > ⚠️ **Deprecation: `@dataclasses.dataclass` instance passed via `qd.Template`.**
 > Passing a `@dataclasses.dataclass` instance into a `qd.Template`-annotated kernel parameter is not supported and emits a `DeprecationWarning` at compile time. In a future release it will become an error.
@@ -30,6 +31,7 @@ It's of course very subjective, but some guidelines you could consider:
 
 - if you are trying to write a python class that runs on the GPU => use a `@qd.data_oriented`
 - if you are trying to write typed dataclasses, for passing data around between the `@data_oriented` classes, and between methods of the same `@data_oriented` class => use `@dataclasses.dataclass`es
+- if you are writing a **static configuration object** - a bag of flags and sizes fixed at setup time, used to specialize kernels => use a frozen `@dataclasses.dataclass` with [`Final[T]`](#compile-time-constant-fields-typingfinal) fields
 - `@qd.dataclass` is used to create structured element types for field tensors. We also use it to create the Cholesky [tiles](tile.md).
 
 ## dataclasses.dataclass
@@ -141,6 +143,52 @@ Note: assigning a sub-struct to a local variable and then passing it (`t = s.inn
 ### Frozen vs non-frozen
 
 A `dataclasses.dataclass` may be either non-frozen (the default) or frozen (`@dataclass(frozen=True)`). Both work as kernel arguments, but **kernel launch is faster with `frozen=True`** (because it enables some optimizations that would otherwise not be possible). Recommend `frozen=True` unless you specifically need to rebind members after construction. Note that rebinding members after construction contradicts certain best practices; for example, it is typically incompatible with type linters such as pyright and mypy.
+
+### Compile-time constant fields: `typing.Final`
+
+By default a primitive dataclass field becomes a **runtime** kernel argument: you can change its value between launches without recompiling, and the kernel reads the fresh value each launch. That also means the value is not known at compile time, so it cannot be used inside [`qd.static(...)`](static.md), as a static loop bound, or to eliminate a branch at compile time.
+
+Annotate the field with `typing.Final[T]` to make it a **compile-time constant** instead. The value is baked into the compiled kernel:
+
+```python
+import dataclasses
+from typing import Final
+
+@dataclasses.dataclass(frozen=True)
+class SimConfig:
+    enable_gravity: Final[bool]   # compile-time constant
+    dt: Final[float]              # compile-time constant
+    n_substeps: int               # ordinary runtime kernel argument
+
+@qd.kernel
+def integrate(config: SimConfig, positions: qd.types.NDArray[qd.f32, 1]):
+    # Legal because dt is Final: qd.static requires a compile-time constant.
+    dt = qd.static(config.dt)
+    for i in positions:
+        # This branch is resolved at compile time; the untaken side is not compiled at all.
+        if qd.static(config.enable_gravity):
+            positions[i] -= 9.8 * dt
+        positions[i] += config.n_substeps * dt   # n_substeps read at runtime
+
+integrate(SimConfig(enable_gravity=True, dt=0.01, n_substeps=4), positions)
+```
+
+This is the recommended pattern for **static configuration objects** - bags of flags and sizes that are fixed once at setup time and used to specialize kernels. It replaces the older approach of declaring such a config as `@qd.data_oriented` and passing it via `qd.Template` purely to obtain compile-time member reads.
+
+Semantics of a `Final[T]` field:
+
+- **Baked into the kernel.** `config.field` inside a kernel body (or inside a `@qd.func` called from one) resolves at compile time to the field's actual Python value.
+- **Each distinct value compiles a separate kernel.** The value is part of both the in-process specialization key and the on-disk [fastcache](fastcache.md) key, so changing it triggers a recompile and never reuses a kernel built for a different value. Two instances carrying equal values share one compiled kernel.
+- **Not a kernel argument.** A `Final` field occupies no kernel argument slot and costs nothing at launch.
+- **Mixing is fine.** Final and ordinary fields coexist in the same dataclass, at any nesting depth.
+
+Restrictions:
+
+- **The class must be frozen** (`frozen=True`, or `unsafe_hash=True` if you must keep it mutable and take responsibility for never reassigning these fields). A baked value must not be reassignable; a plain non-frozen `@dataclass` is rejected with an error.
+- **`T` must be a value Quadrants can bake as a literal**: `bool`, `int`, `float`, `str`, or an `enum.Enum` subclass. Arrays, `qd.dataclass` structs, `qd.Tensor`, nested dataclasses and arbitrary objects are rejected. To make a nested dataclass's leaves compile-time, mark those leaf fields `Final` rather than the nested field itself.
+- **String annotations are rejected.** `from __future__ import annotations` leaves the annotation unresolved, so Quadrants cannot see the `Final` and would silently lower the field as a runtime argument. This raises rather than silently doing the wrong thing.
+
+If you want the opposite trade-off for a `@qd.data_oriented` class (primitive members that are *runtime* rather than baked), see [Runtime primitives: `template_primitives=False`](#runtime-primitives-template_primitivesfalse).
 
 ### Under the hood
 

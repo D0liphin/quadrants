@@ -22,7 +22,11 @@ from quadrants.lang import (
     matrix,
 )
 from quadrants.lang import ops as qd_ops
-from quadrants.lang._dataclass_util import create_flat_name, is_final_annotation
+from quadrants.lang._dataclass_util import (
+    create_flat_name,
+    final_field_names,
+    is_final_annotation,
+)
 from quadrants.lang.ast.ast_transformer_utils import (
     ASTTransformerFuncContext,
 )
@@ -149,19 +153,21 @@ class FunctionDefTransformer:
         func_id = ctx.func.func_id
         if dataclasses.is_dataclass(argument_type):
             ctx.create_variable(argument_name, argument_type)
+            # ``typing.Final[T]`` fields are baked as compile-time constants rather than declared as runtime kernel
+            # args. Cached + validated once per dataclass type; empty for every dataclass not using the feature.
+            final_names = final_field_names(argument_type)
             for field_idx, field in enumerate(dataclasses.fields(argument_type)):
                 flat_name = create_flat_name(argument_name, field.name)
                 if pruning.enforcing and flat_name not in pruning.used_vars_by_func_id[func_id]:
                     continue
-                # POC (PR-A): ``typing.Final[T]`` field => bake the runtime value from the passed-in dataclass instance
-                # as a compile-time constant. Binds ``flat_name`` to the actual Python value so that
+                # Bind ``flat_name`` to the actual Python value off the passed-in instance, so that
                 # ``FlattenAttributeNameTransformer``-rewritten ``config.field`` -> ``Name(__qd_config__qd_field)``
-                # resolves to a Python constant in ``build_Name``, making ``qd.static(config.field)`` legal on plain
-                # frozen dataclasses without opting the class into ``@qd.data_oriented``. The corresponding value is
-                # folded into the template mapper spec key (see ``_extract_arg`` in ``_template_mapper_hotpath.py``)
-                # so distinct Final values compile distinct kernels; the launch path (``_recursive_set_args`` in
-                # ``_func_base.py``) skips Final fields since they carry no runtime arg slot.
-                if is_final_annotation(field.type):
+                # resolves to a Python constant in ``build_Name``. That is what makes ``qd.static(config.field)`` legal
+                # on a plain frozen dataclass without opting the class into ``@qd.data_oriented``. The value is folded
+                # into the template spec key (``_extract_arg``) and the fastcache key
+                # (``args_hasher.dataclass_to_repr``) so distinct values compile distinct kernels, and the launch path
+                # (``_recursive_set_args``) skips these fields since they own no runtime arg slot.
+                if field.name in final_names:
                     assert arg_value is not None, (
                         f"Final-annotated dataclass field {field.name!r} needs the runtime dataclass instance to "
                         f"bake its value; kernel-arg dispatch omitted ``arg_value``"
@@ -341,12 +347,11 @@ class FunctionDefTransformer:
         argument_type: Any,
         data: Any,
     ) -> None:
-        # POC (PR-A): ``typing.Final[T]`` field of a caller's dataclass, flattened by
-        # ``expand_func_arguments`` into a leaf @qd.func arg with annotation ``Final[T]``. The caller's
-        # ``_transform_kernel_arg`` already bound the caller-side flat name to the actual Python value (see
-        # kernel-side branch), and ``build_Name`` propagated that value into ``data`` as the resolved py-arg.
-        # Bind it directly (compile-time) so ``qd.static(cfg.field)`` inside the @qd.func body sees a Python
-        # constant rather than an ``Expr``. Handled ahead of the ``annotations.template`` check because
+        # ``typing.Final[T]`` field of a caller's dataclass, flattened by ``expand_func_arguments`` into a leaf @qd.func
+        # arg with annotation ``Final[T]``. The caller's ``_transform_kernel_arg`` already bound the caller-side flat
+        # name to the actual Python value, and ``build_Name`` propagated that value into ``data`` as the resolved
+        # py-arg. Bind it directly (compile-time) so ``qd.static(cfg.field)`` inside the @qd.func body sees a Python
+        # constant rather than an ``Expr``. Handled ahead of the ``annotations.template`` check below because
         # ``isinstance(Final[T], annotations.template)`` is ``False``.
         if is_final_annotation(argument_type):
             ctx.create_variable(argument_name, data)
