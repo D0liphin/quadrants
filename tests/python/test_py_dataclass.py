@@ -3347,6 +3347,94 @@ def test_final_and_non_final_fields_mix():
 
 
 @test_utils.test()
+def test_final_field_identical_values_share_compiled_kernel():
+    """Kernel caching correctness: two ``SimConfig`` instances with the same Final-field value must reuse the same
+    compiled kernel. Two consecutive launches with equal Final values keep ``template_mapper.mapping`` size at 1;
+    a third launch with a different value grows it to 2. Guards against accidentally hashing the *instance* rather
+    than the *value* in the spec key."""
+    from typing import Final
+
+    @dataclass(frozen=True)
+    class SimConfig:
+        offset: Final[int]
+
+    @qd.kernel
+    def bump(config: SimConfig, x: qd.types.NDArray[qd.i32, 1]):
+        v = qd.static(config.offset)
+        for i in x:
+            x[i] += v
+
+    x = qd.ndarray(qd.i32, shape=(3,))
+    bump(SimConfig(offset=5), x)
+    assert len(bump._primal.mapper.mapping) == 1
+    bump(SimConfig(offset=5), x)  # same value, different instance
+    assert len(bump._primal.mapper.mapping) == 1, "identical Final values must share a compiled kernel"
+    bump(SimConfig(offset=100), x)  # different value
+    assert len(bump._primal.mapper.mapping) == 2, "distinct Final values must recompile"
+
+
+@test_utils.test()
+def test_final_field_propagates_through_qd_func_call():
+    """``@qd.func`` invoked from a kernel with a dataclass argument containing a ``Final[T]`` field must see the
+    baked value on its side too. The caller's flat name resolves to a Python value via ``build_Name``, then
+    ``_transform_func_arg`` sees ``annotation=Final[T]`` and binds the value directly - if the func body used
+    ``impl.expr_init_func(data)`` instead, ``cfg.scale`` would arrive as an ``Expr`` and ``qd.static`` would fail
+    with ``Input to qd.static must be compile-time constants``."""
+    from typing import Final
+
+    @dataclass(frozen=True)
+    class Cfg:
+        scale: Final[float]
+
+    @qd.func
+    def scale_by(cfg: Cfg, x: qd.types.NDArray[qd.f32, 1], i: qd.i32):
+        x[i] = x[i] * qd.static(cfg.scale)
+
+    @qd.kernel
+    def apply(cfg: Cfg, x: qd.types.NDArray[qd.f32, 1]):
+        for i in x:
+            scale_by(cfg, x, i)
+
+    x = qd.ndarray(qd.f32, shape=(4,))
+    for i in range(4):
+        x[i] = float(i)
+    apply(Cfg(scale=3.0), x)
+    for i in range(4):
+        assert abs(x[i] - float(i) * 3.0) < 1e-5
+
+
+@test_utils.test()
+def test_final_field_on_nested_dataclass():
+    """Final fields work at any depth: the top-level kernel arg is a dataclass whose field is another dataclass,
+    whose field is ``Final[T]``. The recursive ``_transform_kernel_arg`` walker threads the sub-instance's runtime
+    value through so ``getattr(sub, final_field_name)`` reads the baked value."""
+    from typing import Final
+
+    @dataclass(frozen=True)
+    class Inner:
+        scale: Final[float]
+
+    @dataclass(frozen=True)
+    class Outer:
+        inner: Inner
+        bias: Final[float]
+
+    @qd.kernel
+    def apply(outer: Outer, x: qd.types.NDArray[qd.f32, 1]):
+        s = qd.static(outer.inner.scale)
+        b = qd.static(outer.bias)
+        for i in x:
+            x[i] = x[i] * s + b
+
+    x = qd.ndarray(qd.f32, shape=(3,))
+    for i in range(3):
+        x[i] = float(i)
+    apply(Outer(inner=Inner(scale=2.0), bias=1.0), x)
+    for i in range(3):
+        assert abs(x[i] - (float(i) * 2.0 + 1.0)) < 1e-5
+
+
+@test_utils.test()
 def test_final_field_with_ndarray_sibling():
     """Final scalar fields alongside ``ndarray`` fields in the same frozen dataclass. The ndarray field still flows
     as an ndarray kernel arg (runtime); the Final scalar bakes as compile-time."""

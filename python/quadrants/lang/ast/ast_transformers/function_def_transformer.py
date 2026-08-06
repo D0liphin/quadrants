@@ -341,6 +341,16 @@ class FunctionDefTransformer:
         argument_type: Any,
         data: Any,
     ) -> None:
+        # POC (PR-A): ``typing.Final[T]`` field of a caller's dataclass, flattened by
+        # ``expand_func_arguments`` into a leaf @qd.func arg with annotation ``Final[T]``. The caller's
+        # ``_transform_kernel_arg`` already bound the caller-side flat name to the actual Python value (see
+        # kernel-side branch), and ``build_Name`` propagated that value into ``data`` as the resolved py-arg.
+        # Bind it directly (compile-time) so ``qd.static(cfg.field)`` inside the @qd.func body sees a Python
+        # constant rather than an ``Expr``. Handled ahead of the ``annotations.template`` check because
+        # ``isinstance(Final[T], annotations.template)`` is ``False``.
+        if is_final_annotation(argument_type):
+            ctx.create_variable(argument_name, data)
+            return None
         # Template arguments are passed by reference.
         if isinstance(argument_type, annotations.template):
             ctx.create_variable(argument_name, data)
