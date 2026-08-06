@@ -175,8 +175,9 @@ JITModule *LlvmRuntimeExecutor::create_jit_module(std::unique_ptr<llvm::Module> 
   return jit_session_->add_module(std::move(module));
 }
 
-JITModule *LlvmRuntimeExecutor::create_jit_module_culink(std::vector<std::unique_ptr<llvm::Module>> modules) {
-  return jit_session_->add_module_culink(std::move(modules));
+JITModule *LlvmRuntimeExecutor::create_jit_module_culink(std::vector<std::unique_ptr<llvm::Module>> modules,
+                                                         std::vector<std::string> keys) {
+  return jit_session_->add_module_culink(std::move(modules), std::move(keys));
 }
 
 JITModule *LlvmRuntimeExecutor::get_runtime_jit_module() {

@@ -72,7 +72,9 @@ class LlvmRuntimeExecutor {
   QuadrantsLLVMContext *get_llvm_context();
 
   JITModule *create_jit_module(std::unique_ptr<llvm::Module> module);
-  JITModule *create_jit_module_culink(std::vector<std::unique_ptr<llvm::Module>> modules);
+  // `keys` is parallel to `modules`: per-task IR cache keys for the relocatable-cubin disk cache (§9.D Part B).
+  JITModule *create_jit_module_culink(std::vector<std::unique_ptr<llvm::Module>> modules,
+                                      std::vector<std::string> keys);
 
   JITModule *get_runtime_jit_module();
 

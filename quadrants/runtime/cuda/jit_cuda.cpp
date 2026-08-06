@@ -304,26 +304,45 @@ static std::vector<char> ptx_to_relocatable_cubin(const std::string &ptx, const 
   return bytes;
 }
 
-// Slice 1b: per-construct relocatable-cubin disk cache keyed by the module's LLVM-IR hash (same key basis as PtxCache).
-// A warm run with an unchanged construct hits the cache and skips PTX + ptxas entirely. Directory from
-// QD_CULINK_CUBIN_DIR, else <offline_cache>/culink_cubins, else /tmp/qd_culink_cubins.
-std::vector<char> JITSessionCUDA::get_or_build_construct_cubin(std::unique_ptr<llvm::Module> &module) {
+// Per-construct relocatable-cubin disk cache. A warm run with an unchanged construct hits the cache and skips PTX +
+// ptxas entirely. Directory from QD_CULINK_CUBIN_DIR, else <offline_cache>/culink_cubins_sm_<cc>, else
+// /tmp/qd_culink_cubins_sm_<cc>.
+//
+// §9.D Part B: the key is the caller-supplied per-task IR key (`get_hashed_per_task_cache_key` + "#index"), computed
+// from the *task IR before codegen*. That is the edit-stable key -- an unchanged task hits it on a warm edit even
+// though the whole-kernel LLVM text moved. The slice-1b prototype instead hashed this module's LLVM-IR text, which
+// required running codegen just to produce the thing to hash; that fallback is kept for callers with no key.
+//
+// Cubins are SM-specific (`ptxas -arch=`), so the directory is namespaced by mcpu -- otherwise a cache populated on
+// one GPU would be silently loaded on another. `fast_math` and the rest of the compile config are already folded into
+// the IR key upstream.
+std::vector<char> JITSessionCUDA::get_or_build_construct_cubin(std::unique_ptr<llvm::Module> &module,
+                                                               const std::string &ir_key) {
   namespace fs = std::filesystem;
+  const std::string mcpu = CUDAContext::get_instance().get_mcpu();
   std::string dir = []() {
     const char *e = std::getenv("QD_CULINK_CUBIN_DIR");
     return e != nullptr ? std::string(e) : std::string();
   }();
-  if (dir.empty())
-    dir = config_.offline_cache_file_path.empty() ? "/tmp/qd_culink_cubins"
-                                                   : (config_.offline_cache_file_path + "/culink_cubins");
+  if (dir.empty()) {
+    const std::string leaf = "culink_cubins_" + mcpu;
+    dir = config_.offline_cache_file_path.empty() ? ("/tmp/qd_" + leaf) : (config_.offline_cache_file_path + "/" + leaf);
+  }
   std::error_code ec;
   fs::create_directories(dir, ec);
 
-  std::string llvm_ir_str;
-  llvm::raw_string_ostream os(llvm_ir_str);
-  module->print(os, nullptr);
-  os.flush();
-  std::string key = ptx_cache_->make_cache_key(llvm_ir_str, config_.fast_math);
+  std::string key;
+  if (!ir_key.empty()) {
+    // Hash the IR key (rather than using it raw) so the filename is a fixed-length hex string regardless of the
+    // key's prefix/suffix shape, and so fast_math/mcpu are folded in even when the dir is overridden.
+    key = ptx_cache_->make_cache_key(ir_key + "|" + mcpu, config_.fast_math);
+  } else {
+    std::string llvm_ir_str;
+    llvm::raw_string_ostream os(llvm_ir_str);
+    module->print(os, nullptr);
+    os.flush();
+    key = ptx_cache_->make_cache_key(llvm_ir_str, config_.fast_math);
+  }
   auto cubin_path = fs::path(dir) / (key + ".cubin");
 
   if (fs::exists(cubin_path)) {
@@ -346,7 +365,9 @@ std::vector<char> JITSessionCUDA::get_or_build_construct_cubin(std::unique_ptr<l
   return cubin;
 }
 
-JITModule *JITSessionCUDA::add_module_culink(std::vector<std::unique_ptr<llvm::Module>> modules, int max_reg) {
+JITModule *JITSessionCUDA::add_module_culink(std::vector<std::unique_ptr<llvm::Module>> modules,
+                                             std::vector<std::string> keys,
+                                             int max_reg) {
   // Per-construct-cubin path (migration D/E, WIP, slice 1a): emit PTX per self-contained sub-module and assemble one
   // CUmodule by device-linking them via cuLink. This slice feeds PTX inputs (driver ptxas each, no relocatable-cubin
   // cache yet) to validate the multi-input cuLink + multi-entry launch-by-name path in-tree. Slice 1b swaps PTX inputs
@@ -368,8 +389,11 @@ JITModule *JITSessionCUDA::add_module_culink(std::vector<std::unique_ptr<llvm::M
   std::vector<std::vector<char>> cubins;  // slice 1b path
   auto t_ptx0 = Time::get_time();
   if (use_cubin) {
-    for (auto &m : modules)
-      cubins.push_back(get_or_build_construct_cubin(m));
+    // `keys` is parallel to `modules` when the codegen driver supplied per-task IR keys; an empty/short vector falls
+    // back to the LLVM-text hash inside get_or_build_construct_cubin.
+    QD_ASSERT(keys.empty() || keys.size() == modules.size());
+    for (std::size_t i = 0; i < modules.size(); i++)
+      cubins.push_back(get_or_build_construct_cubin(modules[i], keys.empty() ? std::string() : keys[i]));
   } else {
     ptxs.reserve(modules.size());
     for (auto &m : modules)

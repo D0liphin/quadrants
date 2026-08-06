@@ -100,10 +100,10 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
 
   auto &offloads = block->statements;
   std::vector<std::unique_ptr<LLVMCompiledTask>> data(offloads.size());
-  std::vector<std::string> pertask_keys;
-  if (log_pertask_key) {
-    pertask_keys.resize(offloads.size());
-  }
+  // Always populated (not just under QD_PERTASK_KEY_LOG): the per-task IR cache key is what the relocatable-cubin
+  // disk cache is keyed by (§9.D Part B), so it must be available to the JIT for every compile. Cheap (one string
+  // per task, already computed for the in-memory cache lookup).
+  std::vector<std::string> pertask_keys(offloads.size());
   // A1 per-task cache keying needs the device caps; fetch once (cheap) so the per-task codegen cache is always active.
   const DeviceCapabilityConfig pertask_caps = prog->get_device_caps();
   auto &task_cache = get_llvm_program(kernel->program)->per_task_module_cache();
@@ -124,10 +124,8 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
       // names, which stay unique within the new kernel's linked module.
       const std::string key =
           get_hashed_per_task_cache_key(compile_config_, pertask_caps, offload->as<OffloadedStmt>(), kernel);
-      if (log_pertask_key) {
-        pertask_keys[i] = key;
-      }
       const std::string cache_key = key + "#" + std::to_string(i);
+      pertask_keys[i] = cache_key;
 
       // Autodiff tasks register per-task AdStack sizing into the program-scoped adstack cache as a compile-time side
       // effect keyed on {kernel_name, task_codegen_id}; a cross-kernel cache hit would skip that registration, so keep
@@ -324,6 +322,7 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
     return e != nullptr && std::string(e) == "1";
   }();
   std::vector<std::unique_ptr<llvm::Module>> per_construct_modules;
+  std::vector<std::string> per_construct_keys;
   auto t_pc0 = _pt_now();
   if (culink_pertask) {
     for (int i = 0; i < (int)data.size(); i++) {
@@ -334,6 +333,9 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
       auto linked_one = tlctx_.link_compiled_tasks(std::move(one));
       optimize_module(linked_one.module.get());
       per_construct_modules.push_back(std::move(linked_one.module));
+      // Keep parallel with the module vector (note the `continue` above skips empty tasks, so index i is not usable
+      // as the cubin-cache slot). The cubin cache keys on this task IR key, not the module's LLVM text.
+      per_construct_keys.push_back(pertask_keys[i]);
     }
   }
   auto t_link0 = _pt_now();
@@ -342,6 +344,7 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
   optimize_module(llvm_compiled_kernel.module.get());
   auto t_end = _pt_now();
   llvm_compiled_kernel.per_construct_modules = std::move(per_construct_modules);
+  llvm_compiled_kernel.per_construct_keys = std::move(per_construct_keys);
   llvm_compiled_kernel.per_task_cache_stats = {(int)offloads.size(), n_cache_hit.load(), n_recompiled.load()};
   // If the per-construct frontend split ran for this kernel (§9.C), surface its cache stats alongside the per-task
   // ones. Recorded by `split_frontend_per_construct` on the program-scoped construct cache, keyed by kernel name.

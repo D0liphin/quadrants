@@ -209,6 +209,12 @@ struct LLVMCompiledKernel {
   // (migration D/E, WIP). Populated only under QD_CULINK_PERTASK; empty => the JIT uses the whole-module `module`.
   // Not serialized (prototype): a cache reload falls back to the whole-module path.
   std::vector<std::unique_ptr<llvm::Module>> per_construct_modules;
+  // Parallel to `per_construct_modules`: the per-task IR cache key (`get_hashed_per_task_cache_key` + "#index") for
+  // each sub-module. This is what the relocatable-cubin disk cache is keyed by (§9.D Part B) -- NOT the module's
+  // LLVM-IR text hash, which was the slice-1b prototype key. The IR key is computed from the *task IR* before codegen,
+  // so it is stable across LLVM-text churn and is the key an unchanged task must hit on a warm edit. Transient, like
+  // `per_construct_modules`.
+  std::vector<std::string> per_construct_keys;
   // Per-task compile-cache stats for the compile that produced this kernel (transient, not serialized). Set by the
   // codegen driver; surfaced host-side via `LLVM::CompiledKernelData::get_per_task_cache_stats`.
   PerTaskCacheStats per_task_cache_stats;

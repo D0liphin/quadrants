@@ -3470,6 +3470,9 @@ LLVMCompiledKernel LLVMCompiledKernel::clone() const {
   result.per_construct_modules.reserve(per_construct_modules.size());
   for (auto &m : per_construct_modules)
     result.per_construct_modules.push_back(llvm::CloneModule(*m));
+  // Must travel with the modules: the launcher consumes a clone, and dropping the keys would silently demote the
+  // cubin disk cache to the LLVM-text-hash fallback.
+  result.per_construct_keys = per_construct_keys;
   result.per_task_cache_stats = per_task_cache_stats;
   return result;
 }

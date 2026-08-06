@@ -65,10 +65,13 @@ class JITSessionCUDA : public JITSession {
                  llvm::DataLayout data_layout,
                  ProgramImpl *program_impl);
   JITModule *add_module(std::unique_ptr<llvm::Module> M, int max_reg) override;
-  JITModule *add_module_culink(std::vector<std::unique_ptr<llvm::Module>> modules, int max_reg) override;
-  // Slice 1b: return a relocatable cubin for one self-contained construct module, hitting a disk cache keyed by the
-  // module's LLVM-IR hash (skips PTX + ptxas on a warm unchanged construct).
-  std::vector<char> get_or_build_construct_cubin(std::unique_ptr<llvm::Module> &module);
+  JITModule *add_module_culink(std::vector<std::unique_ptr<llvm::Module>> modules,
+                               std::vector<std::string> keys,
+                               int max_reg) override;
+  // Return a relocatable cubin for one self-contained construct module, hitting a disk cache (skips PTX + ptxas on a
+  // warm unchanged construct). `ir_key` is the per-task IR cache key (§9.D Part B); when empty we fall back to the
+  // slice-1b prototype behavior of hashing the module's LLVM-IR text.
+  std::vector<char> get_or_build_construct_cubin(std::unique_ptr<llvm::Module> &module, const std::string &ir_key);
   llvm::DataLayout get_data_layout() override;
 
  private:

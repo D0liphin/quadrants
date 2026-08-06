@@ -30,7 +30,11 @@ class JITSession {
   // Per-construct-cubin path (migration D/E, WIP): assemble one JIT module from several self-contained sub-modules by
   // emitting a relocatable cubin per sub-module and device-linking them (`cuLink`). Only the CUDA backend implements
   // this; the default errors so other backends are unaffected.
-  virtual JITModule *add_module_culink(std::vector<std::unique_ptr<llvm::Module>> modules, int max_reg = 0) {
+  // `keys` is parallel to `modules`: the per-task IR cache key for each sub-module, used to key the relocatable-cubin
+  // disk cache (§9.D Part B). May be empty, in which case the backend falls back to hashing the module's LLVM text.
+  virtual JITModule *add_module_culink(std::vector<std::unique_ptr<llvm::Module>> modules,
+                                       std::vector<std::string> keys,
+                                       int max_reg = 0) {
     QD_NOT_IMPLEMENTED
   }
 
