@@ -1,3 +1,35 @@
+import typing
+from typing import Any
+
+
+def is_final_annotation(annotation: Any) -> bool:
+    """Return True if ``annotation`` is a ``typing.Final[T]`` special form.
+
+    The POC uses ``typing.Final[T]`` on frozen-dataclass fields as the signal that the field's value should be baked
+    into the compiled kernel as a compile-time constant (like a ``qd.template()``-annotated arg): its value is folded
+    into the template spec key (so distinct values compile distinct kernels), it does not appear as a runtime kernel
+    scalar arg, and ``qd.static(config.field)`` inside the kernel body resolves at compile time.
+
+    Bare ``typing.Final`` (with no ``T``) is not accepted - Quadrants needs the wrapped type to know how to treat the
+    baked value.
+    """
+    return typing.get_origin(annotation) is typing.Final
+
+
+def unwrap_final(annotation: Any) -> Any:
+    """Strip a ``typing.Final[T]`` wrapper and return ``T``. Returns ``annotation`` unchanged when it isn't ``Final``.
+
+    Callers that already know the annotation is ``Final`` should still use this helper (rather than
+    ``typing.get_args(annotation)[0]`` directly) so the failure mode for a malformed ``Final`` is uniform.
+    """
+    if not is_final_annotation(annotation):
+        return annotation
+    args = typing.get_args(annotation)
+    if not args:
+        raise TypeError(f"typing.Final without a wrapped type is not supported: {annotation!r}")
+    return args[0]
+
+
 def create_flat_name(basename: str, child_name: str) -> str:
     """
     Appends child_name to basename, separated by __qd_.

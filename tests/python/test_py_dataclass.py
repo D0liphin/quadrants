@@ -3239,3 +3239,131 @@ def test_typed_dataclass_does_not_emit_deprecation_warning():
         run(f)
     matching = [w for w in caught if issubclass(w.category, DeprecationWarning) and "qd.Template" in str(w.message)]
     assert matching == [], f"unexpected DeprecationWarning(s): {[str(w.message) for w in matching]}"
+
+
+# ---------------------------------------------------------------------------
+# POC: ``typing.Final[T]`` fields on frozen dataclasses => compile-time templates.
+#
+# Design goal (see perso_hugh/doc/final_dataclass_templates.md): let users mark selected fields of a plain frozen
+# ``@dataclasses.dataclass`` config as ``typing.Final[T]`` to signal that the field's value must be baked as a
+# compile-time constant. This replaces the pre-existing ``@qd.data_oriented`` + ``qd.Template`` pattern for static
+# configs — where the same effect required opting the whole class into the data_oriented machinery and paying the
+# associated per-launch overhead (see PR #705 discussion of ``_arg_disposition`` / ``TemplateMapper.lookup``).
+#
+# Semantics:
+# - ``config.field`` accessed inside a kernel body resolves at AST-build time to the actual Python value baked into
+#   ``config``. ``qd.static(config.field)`` therefore works, as does ``if qd.static(config.flag): ...`` dead-branch
+#   elimination.
+# - The value of every ``Final[T]`` field is folded into the template mapper's spec key; two configs that differ on
+#   any Final field compile distinct kernels.
+# - Final fields are NOT declared as runtime scalar kernel args and are NOT pushed into the launch context.
+# - Fields without ``Final`` retain the current typed-dataclass behavior (declared as runtime scalar / ndarray kernel
+#   args and passed at launch time). Mixing Final and non-Final fields in the same dataclass is supported.
+# ---------------------------------------------------------------------------
+
+
+@test_utils.test()
+def test_final_field_bakes_as_compile_time_constant_via_qd_static():
+    """Baseline POC: ``qd.static(config.dt)`` on a frozen dataclass with ``dt: Final[float]`` compiles and produces
+    the expected numeric result. The important part is that the kernel compiles at all - ``qd.static`` fails today
+    on a non-Final dataclass field because the field lowers to a runtime scalar ``Expr`` (see
+    ``QuadrantsCompilationError: Invalid data type typing.Final[int]`` before this change).
+
+    ``qd.static(config.dt)`` is materialised into a named local ``dt_const`` before the kernel's inner-loop assign to
+    avoid ``build_Assign``'s ``is_static_assign`` check (``out[i] = qd.static(...)`` is rejected as
+    "Static assign cannot be used on elements in arrays"). Reading the same Python value from a bound local is
+    unaffected - it's still the baked constant."""
+    from typing import Final
+
+    @dataclass(frozen=True)
+    class SimConfig:
+        dt: Final[float]
+        enable_gravity: Final[bool]
+
+    @qd.kernel
+    def integrate(config: SimConfig, positions: qd.types.NDArray[qd.f32, 1]):
+        dt_const = qd.static(config.dt)
+        for i in positions:
+            positions[i] += dt_const
+            if qd.static(config.enable_gravity):
+                positions[i] -= 9.8 * dt_const
+
+    cfg = SimConfig(dt=0.5, enable_gravity=True)
+    x = qd.ndarray(qd.f32, shape=(4,))
+    integrate(cfg, x)
+    # 0.5 - 9.8 * 0.5 = -4.4
+    for i in range(4):
+        assert abs(x[i] - (-4.4)) < 1e-4
+
+
+@test_utils.test()
+def test_final_field_value_change_triggers_recompilation():
+    """Two ``SimConfig`` instances with different Final-field values must compile as distinct kernels - the Final
+    field's value has to be part of the template mapper spec key, otherwise the second launch would reuse the
+    first's baked-in constant and produce the wrong output."""
+    from typing import Final
+
+    @dataclass(frozen=True)
+    class SimConfig:
+        offset: Final[int]
+
+    @qd.kernel
+    def bump(config: SimConfig, x: qd.types.NDArray[qd.i32, 1]):
+        v = qd.static(config.offset)
+        for i in x:
+            x[i] += v
+
+    x = qd.ndarray(qd.i32, shape=(3,))
+    bump(SimConfig(offset=7), x)
+    bump(SimConfig(offset=100), x)
+    for i in range(3):
+        assert x[i] == 107
+
+
+@test_utils.test()
+def test_final_and_non_final_fields_mix():
+    """Non-Final fields retain the current runtime-scalar-arg behavior; Final fields flow through the template path.
+    Both must coexist in the same dataclass."""
+    from typing import Final
+
+    @dataclass(frozen=True)
+    class Params:
+        scale: Final[float]  # compile-time constant
+        bias: float  # runtime scalar kernel arg
+
+    @qd.kernel
+    def apply(p: Params, x: qd.types.NDArray[qd.f32, 1]):
+        s = qd.static(p.scale)
+        for i in x:
+            x[i] = x[i] * s + p.bias
+
+    x = qd.ndarray(qd.f32, shape=(3,))
+    for i in range(3):
+        x[i] = float(i)
+    apply(Params(scale=2.0, bias=1.0), x)
+    # scale=2.0 baked; bias=1.0 passed at launch.
+    for i in range(3):
+        assert abs(x[i] - (float(i) * 2.0 + 1.0)) < 1e-5
+
+
+@test_utils.test()
+def test_final_field_with_ndarray_sibling():
+    """Final scalar fields alongside ``ndarray`` fields in the same frozen dataclass. The ndarray field still flows
+    as an ndarray kernel arg (runtime); the Final scalar bakes as compile-time."""
+    from typing import Final
+
+    @dataclass(frozen=True)
+    class State:
+        n: Final[int]
+        buf: qd.types.NDArray[qd.i32, 1]
+
+    @qd.kernel
+    def fill(state: State):
+        n_const = qd.static(state.n)
+        for i in range(n_const):
+            state.buf[i] = n_const - i
+
+    buf = qd.ndarray(qd.i32, shape=(5,))
+    fill(State(n=5, buf=buf))
+    for i in range(5):
+        assert buf[i] == 5 - i

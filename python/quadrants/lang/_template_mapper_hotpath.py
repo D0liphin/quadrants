@@ -38,7 +38,7 @@ from quadrants._tensor import (
 )
 from quadrants._tensor_wrapper import _TENSOR_WRAPPER_TYPES
 from quadrants._tensor_wrapper import Tensor as _TensorClass
-from quadrants.lang._dataclass_util import create_flat_name
+from quadrants.lang._dataclass_util import create_flat_name, is_final_annotation
 from quadrants.lang._ndarray import Ndarray
 from quadrants.lang.any_array import AnyArray
 from quadrants.lang.buffer_view import BufferView as BufferViewInstance
@@ -397,9 +397,16 @@ def _extract_arg(raise_on_templated_floats: bool, arg: Any, annotation: Annotati
                 return arg._key
             except AttributeError:
                 pass
+        # POC (PR-A): ``typing.Final[T]`` field => bake the actual value directly into the spec key so distinct
+        # values compile distinct kernels. Non-Final fields keep the current behavior (recursive ``_extract_arg``,
+        # which for plain primitive types returns the ``"#"`` placeholder and thus does not participate in
+        # templatisation). The per-instance ``_key`` cache above short-circuits both paths for frozen dataclasses,
+        # so this extra ``is_final_annotation`` check runs at most once per (instance, kernel) lifetime.
         key = tuple(
             [
-                _extract_arg(
+                getattr(arg, field.name)
+                if is_final_annotation(field.type)
+                else _extract_arg(
                     raise_on_templated_floats,
                     getattr(arg, field.name),
                     field.type,
