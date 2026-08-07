@@ -37,13 +37,6 @@ namespace gfx {
 
 namespace {
 
-// An external (host) array argument must be mirrored to its per-launch device buffer whenever the kernel touches it at
-// all, not only when the kernel reads it. Gating the h2d blit on READ alone assumes "no loads => the kernel overwrites
-// every element", which any partial write breaks: a conditional store, a loop that does not span the array, or an
-// ndrange covering part of it all leave indices the kernel never wrote, and the symmetric d2h readback then copies the
-// freshly allocated buffer's contents at those indices back over the caller's array. See quadrants#841. `NONE` is
-// still meaningful and is pre-populated per array arg by `KernelContextAttributes`, so an argument the kernel never
-// touches skips both blits.
 constexpr uint32_t kExtArrReadWrite =
     uint32_t(irpass::ExternalPtrAccess::READ) | uint32_t(irpass::ExternalPtrAccess::WRITE);
 
