@@ -57,20 +57,6 @@ def is_final_annotation(annotation: Any) -> bool:
     return typing.get_origin(annotation) is typing.Final
 
 
-def unwrap_final(annotation: Any) -> Any:
-    """Strip a ``typing.Final[T]`` wrapper and return ``T``. Returns ``annotation`` unchanged when it isn't ``Final``.
-
-    Callers that already know the annotation is ``Final`` should still use this helper (rather than indexing
-    ``typing.get_args(annotation)[0]`` directly) so that the failure mode for a malformed ``Final`` stays uniform.
-    """
-    if not is_final_annotation(annotation):
-        return annotation
-    args = typing.get_args(annotation)
-    if not args:
-        raise TypeError(f"typing.Final without a wrapped type is not supported: {annotation!r}")
-    return args[0]
-
-
 def _describe_annotation(annotation: Any) -> str:
     return getattr(annotation, "__name__", None) or repr(annotation)
 

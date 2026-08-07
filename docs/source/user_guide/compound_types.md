@@ -178,7 +178,7 @@ This is the recommended pattern for **static configuration objects** - bags of f
 Semantics of a `Final[T]` field:
 
 - **Baked into the kernel.** `config.field` inside a kernel body (or inside a `@qd.func` called from one) resolves at compile time to the field's actual Python value.
-- **Each distinct value compiles a separate kernel.** The value is part of both the in-process specialization key and the on-disk [fastcache](fastcache.md) key, so changing it triggers a recompile and never reuses a kernel built for a different value. Two instances carrying equal values share one compiled kernel.
+- **Each distinct value compiles a separate kernel.** Quadrants decides which compiled kernel to reuse by looking at the field's value, both within the running process and in the on-disk [fastcache](fastcache.md). Changing the value therefore triggers a recompile, and a kernel built for one value is never reused for another. Two instances carrying equal values share one compiled kernel.
 - **Not a kernel argument.** A `Final` field occupies no kernel argument slot and costs nothing at launch.
 - **Mixing is fine.** Final and ordinary fields coexist in the same dataclass, at any nesting depth.
 
@@ -186,7 +186,7 @@ Restrictions:
 
 - **The class must be frozen** (`frozen=True`, or `unsafe_hash=True` if you must keep it mutable and take responsibility for never reassigning these fields). A baked value must not be reassignable; a plain non-frozen `@dataclass` is rejected with an error.
 - **`T` must be a value Quadrants can bake as a literal**: `bool`, `int`, `float`, `str`, or an `enum.Enum` subclass. Arrays, `qd.dataclass` structs, [`qd.Tensor`](tensor.md), nested dataclasses and arbitrary objects are rejected. To make a nested dataclass's leaves compile-time, mark those leaf fields `Final` rather than the nested field itself.
-- **String annotations are rejected.** `from __future__ import annotations` leaves the annotation unresolved, so Quadrants cannot see the `Final` and would silently lower the field as a runtime argument. This raises rather than silently doing the wrong thing.
+- **String annotations are rejected.** `from __future__ import annotations` leaves the annotation unresolved, so Quadrants cannot see the `Final` and would silently treat the field as an ordinary runtime argument. This raises an error rather than quietly doing the wrong thing.
 
 If you want the opposite trade-off for a `@qd.data_oriented` class (primitive members that are *runtime* rather than baked), see [Runtime primitives: `template_primitives=False`](#runtime-primitives-template_primitivesfalse).
 
