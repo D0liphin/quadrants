@@ -328,6 +328,35 @@ def _install_python_backend_dtype_call():
     DataTypeCxx.__call__ = _dtype_call  # type: ignore[assignment]
 
 
+def _check_ir_load_envs_against_caching(cfg, src_ll_cache: bool) -> None:
+    """Reject QD_LOAD_IR / QUADRANTS_LOAD_PTX when a cache could stop codegen from ever reading the files.
+
+    Both variables make codegen discard the module it just built and use IR / PTX read back from ``debug_dump_path``
+    instead. Codegen only runs on a cache miss, since ``KernelCompilationManager::load_or_compile`` returns the cached
+    artifact otherwise, so with caching enabled an already-cached kernel is handed back untouched and the edited file is
+    never read. The kernel still runs, it just is not the code that was edited, and nothing says so.
+
+    Must be called after arch selection: each variable is only read by some backends, and ``adaptive_arch_select`` may
+    have fallen back to an arch other than the one requested.
+    """
+    active = []
+    # codegen_llvm.cpp reads QD_LOAD_IR via get_environ_config, which parses the value as an int, so "0" leaves it off.
+    # It lives in the LLVM codegen, so the SPIR-V backends (Vulkan, Metal) never read it.
+    if os.getenv("QD_LOAD_IR", "0") not in ("", "0") and _qd_core.arch_uses_llvm(cfg.arch):
+        active.append("QD_LOAD_IR")
+    # jit_cuda.cpp only checks that QUADRANTS_LOAD_PTX is present, so any value at all enables it, but only on CUDA.
+    if os.getenv("QUADRANTS_LOAD_PTX") is not None and cfg.arch == _qd_core.cuda:
+        active.append("QUADRANTS_LOAD_PTX")
+    if not active or not (cfg.offline_cache or src_ll_cache):
+        return
+    names = " and ".join(active)
+    raise ValueError(
+        f"Caching must be disabled when using {names}: replacement IR/PTX is read from debug_dump_path only for a "
+        "kernel that is actually compiled, and cached kernels are returned without running codegen, so the files would "
+        f"be silently ignored. Pass offline_cache=False and src_ll_cache=False to qd.init, or unset {names}."
+    )
+
+
 def init(
     arch=None,
     default_fp=None,
@@ -454,26 +483,6 @@ def init(
             "[warning_code=DUMP_IR_CACHE_MISMATCH]"
         )
 
-    # QD_LOAD_IR and QUADRANTS_LOAD_PTX make codegen discard what it just built and use IR / PTX read back from
-    # debug_dump_path instead. Codegen only runs on a cache miss (KernelCompilationManager::load_or_compile returns the
-    # cached artifact otherwise), so with caching on, an already-cached kernel is handed back untouched and the edited
-    # files are never read. The kernel still runs, it just is not the code that was edited, which is silent and easy to
-    # lose hours to. Refuse the combination rather than warn.
-    active_load_envs = []
-    # codegen_llvm.cpp reads QD_LOAD_IR through get_environ_config, which parses the value as an int, so "0" is off.
-    if os.getenv("QD_LOAD_IR", "0") not in ("", "0"):
-        active_load_envs.append("QD_LOAD_IR")
-    # jit_cuda.cpp only checks that QUADRANTS_LOAD_PTX is present, so any value at all enables the PTX load path.
-    if os.getenv("QUADRANTS_LOAD_PTX") is not None:
-        active_load_envs.append("QUADRANTS_LOAD_PTX")
-    if active_load_envs and (cfg.offline_cache or src_ll_cache):
-        names = " and ".join(active_load_envs)
-        raise ValueError(
-            f"Caching must be disabled when using {names}: replacement IR/PTX is read from debug_dump_path only for a "
-            "kernel that is actually compiled, and cached kernels are returned without running codegen, so the files "
-            f"would be silently ignored. Pass offline_cache=False and src_ll_cache=False to qd.init, or unset {names}."
-        )
-
     # dispatch configurations that are not in qd.cfg:
     runtime = impl.get_runtime()
     if not _test_mode:
@@ -495,6 +504,8 @@ def init(
 
     if cfg.arch == _qd_core.amdgpu and get_os_name() == "win":
         _logging.warn("AMDGPU support on Windows is experimental and may not work as expected.")
+
+    _check_ir_load_envs_against_caching(cfg, src_ll_cache)
 
     if _test_mode:
         return spec_cfg
