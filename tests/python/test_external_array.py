@@ -24,8 +24,7 @@ def _make_numpy(n, fill):
 
 
 def _make_torch(n, fill):
-    # Imported here rather than at module scope so the file collects without torch installed. Deliberately a CPU
-    # tensor: one already resident on the compute device skips the staging path under test.
+    # Imported here rather than at module scope so the file collects without torch installed.
     torch = pytest.importorskip("torch")
     return torch.full((n,), fill, dtype=torch.int32)
 
