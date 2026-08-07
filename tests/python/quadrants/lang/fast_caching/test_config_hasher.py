@@ -37,6 +37,14 @@ def test_config_hasher_ignores_debug_and_runtime_only_keys():
     qd.cfg.cuda_stack_limit = 32768
     assert config_hasher.hash_compile_config() == h_base
 
+    # A process-local queue handle, read live by the runtime. Two addresses, and no queue at all, all hash the same.
+    qd.cfg.external_metal_command_queue = 0x1234
+    assert config_hasher.hash_compile_config() == h_base
+    qd.cfg.external_metal_command_queue = 0x5678
+    assert config_hasher.hash_compile_config() == h_base
+    qd.cfg.external_metal_command_queue = 0
+    assert config_hasher.hash_compile_config() == h_base
+
     # A genuine compiler input still changes the hash, so the exclusions above are not masking everything.
     qd.cfg.fast_math = not qd.cfg.fast_math
     assert config_hasher.hash_compile_config() != h_base

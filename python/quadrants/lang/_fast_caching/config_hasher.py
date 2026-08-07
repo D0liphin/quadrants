@@ -13,6 +13,11 @@ EXCLUDE_KEYS = {
     # Applied once at runtime via context_set_limit(CU_LIMIT_STACK_SIZE) in llvm_runtime_executor, never read by
     # codegen.
     "cuda_stack_limit",
+    # Borrowed MTLCommandQueue* handle, read live from the config by metal_program (device creation) and by
+    # GfxRuntime::submit_current_cmdlist_if_timeout (flush policy), so it is never baked into a compiled kernel. It is
+    # also a process-local address, so hashing it produced a fresh key on every restart and defeated the cache entirely
+    # for shared-queue Metal users.
+    "external_metal_command_queue",
 }
 
 
