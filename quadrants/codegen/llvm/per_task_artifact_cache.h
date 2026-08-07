@@ -116,4 +116,24 @@ inline std::string pertask_artifact_dir_for(const std::string &offline_cache_fil
   return offline_cache_file_path + "/pertask_artifacts";
 }
 
+// `CompiledKernelData::load_impl` has to find the artifact cache but sits far from any `CompileConfig`. The artifacts
+// always live beside the `.qdc` files, so resolve the directory once when the LLVM program is constructed (which is
+// before any kernel is loaded or compiled) instead of threading the config through the whole load path.
+inline std::string &pertask_artifact_dir_ref() {
+  static std::string dir;
+  return dir;
+}
+
+inline void set_pertask_artifact_dir_from_offline_cache(const std::string &offline_cache_file_path) {
+  pertask_artifact_dir_ref() = pertask_artifact_dir_for(offline_cache_file_path);
+}
+
+inline std::string resolved_pertask_artifact_dir() {
+  if (const char *e = std::getenv("QD_PERTASK_ARTIFACT_DIR")) {
+    return std::string(e);
+  }
+  const auto &d = pertask_artifact_dir_ref();
+  return d.empty() ? pertask_artifact_dir_for(std::string()) : d;
+}
+
 }  // namespace quadrants::lang

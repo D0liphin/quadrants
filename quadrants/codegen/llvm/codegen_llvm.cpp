@@ -3481,6 +3481,7 @@ LLVMCompiledKernel LLVMCompiledKernel::clone() const {
     c.struct_for_tls_sizes = a.struct_for_tls_sizes;
     result.per_construct_artifacts.push_back(std::move(c));
   }
+  result.per_task_artifact_keys = per_task_artifact_keys;
   result.per_task_cache_stats = per_task_cache_stats;
   return result;
 }

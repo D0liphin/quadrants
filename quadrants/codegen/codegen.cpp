@@ -109,6 +109,7 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
   const DeviceCapabilityConfig pertask_caps = prog->get_device_caps();
   auto &task_cache = get_llvm_program(kernel->program)->per_task_module_cache();
   std::atomic<int> n_cache_hit{0}, n_recompiled{0}, n_artifact_hit{0};
+  std::atomic<long long> artifact_io_us{0};  // total time reading PerTaskArtifact records from disk (diagnostic)
 
   // §9.D Part B: cross-process per-task artifact cache. On a hit we skip this task's ENTIRE compilation -- CHI->LLVM
   // codegen, link, optimize, PTX and ptxas -- and carry the cached cubin straight to the cuLink assembly, using the
@@ -151,7 +152,13 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
       // frontend cost for unchanged constructs, since their IR was never produced in this process.
       if (const std::string pkey = placeholder_key(i); !pkey.empty()) {
         PerTaskArtifact rec;
-        if (artifact_cache.try_load(pkey, &rec)) {
+        auto _a0 = std::chrono::steady_clock::now();
+        const bool got = artifact_cache.try_load(pkey, &rec);
+        artifact_io_us.fetch_add(
+            (long long)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - _a0)
+                .count(),
+            std::memory_order_relaxed);
+        if (got) {
           data[i] = std::make_unique<LLVMCompiledTask>(
               rec.tasks, nullptr, std::unordered_set<int>(rec.used_tree_ids.begin(), rec.used_tree_ids.end()),
               std::unordered_set<int>(rec.struct_for_tls_sizes.begin(), rec.struct_for_tls_sizes.end()));
@@ -468,6 +475,14 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
   }
   auto t_end = _pt_now();
   llvm_compiled_kernel.per_construct_artifacts = std::move(per_construct_artifacts);
+  // Persistable form of the artifacts: only meaningful when there is no whole-kernel module, i.e. when the `.qdc`
+  // entry must describe this kernel purely as an ordered list of per-task artifacts.
+  if (code_only_tasks) {
+    llvm_compiled_kernel.per_task_artifact_keys.reserve(llvm_compiled_kernel.per_construct_artifacts.size());
+    for (const auto &a : llvm_compiled_kernel.per_construct_artifacts) {
+      llvm_compiled_kernel.per_task_artifact_keys.push_back(a.key);
+    }
+  }
   // Artifact-cache hits are counted as cache hits for observation purposes: from the caller's point of view the task
   // was reused rather than recompiled (it just came from disk rather than from this process's memory).
   llvm_compiled_kernel.per_task_cache_stats = {(int)offloads.size(),
@@ -486,11 +501,12 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
   }
   if (phase_time) {
     QD_INFO(
-        "[phase-time] kernel={} n_tasks={} artifact_cache_hit={} pertask_compile={:.1f}ms "
+        "[phase-time] kernel={} n_tasks={} artifact_cache_hit={} artifact_io={:.1f}ms pertask_compile={:.1f}ms "
         "per_construct_selfcontained={:.1f}ms(n={}) link={:.1f}ms optimize={:.1f}ms whole_module_link={}",
-        kernel->get_name(), (int)offloads.size(), n_artifact_hit.load(), _pt_ms(t_pertask0, t_pc0),
-        _pt_ms(t_pc0, t_link0), (int)llvm_compiled_kernel.per_construct_artifacts.size(), _pt_ms(t_link0, t_opt0),
-        _pt_ms(t_opt0, t_end), code_only_tasks ? "skipped" : "yes");
+        kernel->get_name(), (int)offloads.size(), n_artifact_hit.load(), artifact_io_us.load() / 1000.0,
+        _pt_ms(t_pertask0, t_pc0), _pt_ms(t_pc0, t_link0),
+        (int)llvm_compiled_kernel.per_construct_artifacts.size(), _pt_ms(t_link0, t_opt0), _pt_ms(t_opt0, t_end),
+        code_only_tasks ? "skipped" : "yes");
   }
   return llvm_compiled_kernel;
 }

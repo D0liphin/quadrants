@@ -436,6 +436,7 @@ JITModule *JITSessionCUDA::add_module_culink(std::vector<PerConstructArtifact> a
   link_opts[n_lopt] = kCuJitErrorLogBufferSizeBytes;
   link_optvals[n_lopt++] = (void *)err_sz;
 
+  auto t_link0 = Time::get_time();
   void *link = nullptr;
   QD_ERROR_IF(drv.link_create.call(n_lopt, link_opts, link_optvals, &link), "cuLinkCreate (culink-pertask) failed");
   int n_inputs = use_cubin ? (int)cubins.size() : (int)ptxs.size();
@@ -453,8 +454,10 @@ JITModule *JITSessionCUDA::add_module_culink(std::vector<PerConstructArtifact> a
   auto e_cmp = drv.link_complete.call(link, &cubin, &cubin_sz);
   if (e_cmp != 0)
     QD_ERROR("cuLinkComplete (culink-pertask) failed err={} log=[{}]", e_cmp, err_log.data());
+  auto t_link1 = Time::get_time();
   void *cuda_module = nullptr;
   QD_ERROR_IF(drv.module_load_data.call(&cuda_module, cubin), "module_load_data (culink-pertask) failed");
+  auto t_load1 = Time::get_time();
   drv.link_destroy.call(link);
 
   static const bool phase_time = []() {
@@ -464,9 +467,9 @@ JITModule *JITSessionCUDA::add_module_culink(std::vector<PerConstructArtifact> a
   if (phase_time) {
     QD_INFO(
         "[phase-time] culink-pertask mode={} n_tasks={} prebuilt_from_artifact_cache={} cubin_build_all={:.1f}ms "
-        "linked_cubin={:.1f}KB",
+        "culink={:.1f}ms module_load={:.1f}ms linked_cubin={:.1f}KB",
         use_cubin ? "cubin-cache" : "ptx", (int)artifacts.size(), n_prebuilt, (t_ptx1 - t_ptx0) * 1000,
-        cubin_sz / 1024.0);
+        (t_link1 - t_link0) * 1000, (t_load1 - t_link1) * 1000, cubin_sz / 1024.0);
   }
 
   this->modules.push_back(std::make_unique<JITModuleCUDA>(cuda_module));
