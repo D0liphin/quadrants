@@ -15,13 +15,6 @@ from tests import test_utils
 
 @dataclass(frozen=True)
 class Container:
-    """One kind of array a kernel can be handed: how to build it, and how to read it back for comparison.
-
-    `make(n, fill)` returns an `n`-element int32 array with every element preset to `fill`. Pass a non-zero `fill` in
-    any test that checks untouched elements: the corruption being guarded against shows up as zeros, so a zero preset
-    makes the broken and correct results identical.
-    """
-
     make: Callable[[int, int], Any]
     to_numpy: Callable[[Any], np.ndarray]
 
