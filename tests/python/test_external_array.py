@@ -9,10 +9,6 @@ import quadrants as qd
 
 from tests import test_utils
 
-# `quadrants` is the reference container: already device-resident, so it skips staging entirely and passes even on a
-# broken build. Keeping it in the same parametrization makes the asymmetry explicit and guards against a "fix" that
-# regresses the path which already worked. Only the torch case carries `needs_torch`; marking the whole test would
-# wrongly gate the numpy and qd.ndarray cases behind an optional dependency.
 CONTAINERS = [
     "numpy",
     pytest.param("torch", marks=pytest.mark.needs_torch),
