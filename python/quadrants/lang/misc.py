@@ -364,7 +364,9 @@ def init(
             * ``print_ir`` (bool): Prints the CHI IR of the Quadrants kernels.
             *``offline_cache`` (bool): Enables offline cache of the compiled kernels. Default to True. When this is enabled Quadrants will cache compiled kernel on your local disk to accelerate future calls.
             *``random_seed`` (int): Sets the seed of the random generator. The default is 0.
-            *``debug_dump_path`` (str): used as the base path for QD_DUMP_IR and similar
+            *``debug_dump_path`` (str): used as the base path for QD_DUMP_IR and similar. QD_LOAD_IR and
+              QUADRANTS_LOAD_PTX also read their replacement IR / PTX back from this directory, and require caching to
+              be disabled (see ``offline_cache`` and ``src_ll_cache``).
     """
     # FIXME(https://github.com/taichi-dev/taichi/issues/4811): save the current working directory since it may be
     # changed by the Vulkan backend initialization on OS X.
@@ -450,6 +452,26 @@ def init(
             "Even with print_ir/QD_DUMP_IR enabled, already cached kernels won't get their IRs shown. "
             "You might want to disable caching with offline_cache=False. "
             "[warning_code=DUMP_IR_CACHE_MISMATCH]"
+        )
+
+    # QD_LOAD_IR and QUADRANTS_LOAD_PTX make codegen discard what it just built and use IR / PTX read back from
+    # debug_dump_path instead. Codegen only runs on a cache miss (KernelCompilationManager::load_or_compile returns the
+    # cached artifact otherwise), so with caching on, an already-cached kernel is handed back untouched and the edited
+    # files are never read. The kernel still runs, it just is not the code that was edited, which is silent and easy to
+    # lose hours to. Refuse the combination rather than warn.
+    active_load_envs = []
+    # codegen_llvm.cpp reads QD_LOAD_IR through get_environ_config, which parses the value as an int, so "0" is off.
+    if os.getenv("QD_LOAD_IR", "0") not in ("", "0"):
+        active_load_envs.append("QD_LOAD_IR")
+    # jit_cuda.cpp only checks that QUADRANTS_LOAD_PTX is present, so any value at all enables the PTX load path.
+    if os.getenv("QUADRANTS_LOAD_PTX") is not None:
+        active_load_envs.append("QUADRANTS_LOAD_PTX")
+    if active_load_envs and (cfg.offline_cache or src_ll_cache):
+        names = " and ".join(active_load_envs)
+        raise ValueError(
+            f"Caching must be disabled when using {names}: replacement IR/PTX is read from debug_dump_path only for a "
+            "kernel that is actually compiled, and cached kernels are returned without running codegen, so the files "
+            f"would be silently ignored. Pass offline_cache=False and src_ll_cache=False to qd.init, or unset {names}."
         )
 
     # dispatch configurations that are not in qd.cfg:
