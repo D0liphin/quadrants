@@ -1,25 +1,5 @@
 """Tests for external (host) array kernel arguments - a raw `numpy.ndarray` or `torch.Tensor` passed where an ndarray is
 expected, rather than a device-resident `qd.ndarray`.
-
-On the gfx backends (Metal, Vulkan) such an argument is staged through a device buffer allocated per launch: a
-host->device upload before the kernel, a device->host readback after. Both blits are gated on a per-argument access mask
-built from the optimized IR (`irpass::detect_external_ptr_access_in_task`), which is where the round trip can go wrong.
-The LLVM backends do not gate: CPU uses the host array in place, and CUDA stages it but uploads unconditionally.
-
-`qd.ndarray` is parametrized alongside the host containers throughout. It never enters the staging path, so it pins the
-reference behaviour the host containers must match.
-
-## Partial writes must preserve untouched elements (quadrants#841)
-
-The upload used to be gated on the mask's READ bit alone, so an argument that is only ever stored to got mask WRITE and
-was never uploaded - the kernel ran against a freshly allocated device buffer, and the readback copied that whole
-buffer, including the indices the kernel never wrote, back over the caller's array.
-
-The trigger is the access pattern "stored to, never loaded from" rather than any particular syntax, so three shapes of it
-are covered: a store under a conditional, a loop that does not span the whole array, and two launches that each write a
-disjoint half. These tests assert on the *untouched* indices; asserting only the written elements passes even on a broken
-build. Two controls (a read-modify-write, and a read-only argument) bracket them, so a failure isolates the write-only
-elision rather than external-array staging in general.
 """
 
 import numpy as np
