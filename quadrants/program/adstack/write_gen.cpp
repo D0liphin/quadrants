@@ -175,11 +175,6 @@ void bump_writes_for_kernel_spirv(
     QD_ASSERT(indices.size() == 1);
     int arg_id = indices[0];
     bool kernel_writes = (access & uint32_t(irpass::ExternalPtrAccess::WRITE)) != 0;
-    // The gfx h2d blit is gated on READ|WRITE, not READ alone (see `kExtArrReadWrite` in `runtime/gfx/runtime.cpp`), so
-    // this predicate under-approximates when the blit actually runs. That is harmless here and deliberately left
-    // narrow: the arguments it misses are exactly those with the WRITE bit set, which `kernel_writes` above already
-    // covers, so the generation still bumps for every argument the blit touches. Widening it would only add redundant
-    // bumps. Revisit if the h2d gate ever admits an argument with no WRITE bit.
     bool kone_h2d_blit = (access & uint32_t(irpass::ExternalPtrAccess::READ)) != 0 &&
                          ctx->device_allocation_type[arg_id] == LaunchContextBuilder::DevAllocType::kNone;
     if (!kernel_writes && !kone_h2d_blit) {
