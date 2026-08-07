@@ -699,21 +699,22 @@ void split_frontend_per_construct(IRNode *ir, const CompileConfig &config, const
     if (!seg_emits_task[k])
       continue;  // pure-def-only serial run: no standalone task, recomputed into consuming constructs below
     n_constructs++;
-    auto cloned = irpass::analysis::clone(block);
-    auto *cb = cloned->cast<Block>();
-    cb->set_parent_callable(block->parent_callable());
     // Isolate construct k by its BACKWARD SLICE: keep segment k's whole subtree plus the transitive operand-def chain
     // it reads (const/arg/binop/pointer/field-load chains from earlier segments — recomputed into this construct), and
     // drop every other top-level statement (other constructs' loops and stores). The slice is closed under operands, so
     // no kept statement can reference a dropped one. This both keeps a store together with its own pointer operand and
     // recomputes cross-construct recomputable values (e.g. dynamic loop bounds), without the has_global_side_effect
     // heuristic that mis-stripped pointer chains.
+    //
+    // The slice is computed on the ORIGINAL block and only the surviving top-level statements are cloned. Cloning the
+    // whole block first and deleting afterwards is O(constructs x block size) — ~5.9 s on this kernel, and paid even
+    // when every construct is a cache hit, since the isolated construct is what the key is computed from.
     std::unordered_set<Stmt *> needed;
     std::vector<Stmt *> worklist;
     for (int j = 0; j < n; j++) {
       if (seg_id[j] != k)
         continue;
-      Stmt *tlj = cb->statements[j].get();
+      Stmt *tlj = block->statements[j].get();
       if (needed.insert(tlj).second)
         worklist.push_back(tlj);
       for (Stmt *sub : irpass::analysis::gather_statements(tlj, [](Stmt *) { return true; }))
@@ -727,14 +728,13 @@ void split_frontend_per_construct(IRNode *ir, const CompileConfig &config, const
         if (op != nullptr && needed.insert(op).second)
           worklist.push_back(op);
     }
-    std::vector<Stmt *> to_remove;
+    std::vector<int> keep_indices;
     for (int j = 0; j < n; j++) {
-      Stmt *tlj = cb->statements[j].get();
-      if (needed.find(tlj) == needed.end())
-        to_remove.push_back(tlj);
+      if (needed.find(block->statements[j].get()) != needed.end())
+        keep_indices.push_back(j);
     }
-    for (Stmt *sj : to_remove)
-      cb->extract(sj);
+    auto cloned = irpass::analysis::clone_block_subset(block, keep_indices);
+    auto *cb = cloned.get();
     if (split_trace())
       QD_INFO("[split-trace] {}: construct #{} (seg {}) pre-die stmts={}", kernel->get_name(), n_constructs, k,
               (int)cb->statements.size());
