@@ -2,6 +2,9 @@
 expected, rather than a device-resident `qd.ndarray`.
 """
 
+from dataclasses import dataclass
+from typing import Any, Callable
+
 import numpy as np
 import pytest
 
@@ -9,31 +12,39 @@ import quadrants as qd
 
 from tests import test_utils
 
-CONTAINERS = [
-    "numpy",
-    pytest.param("torch", marks=pytest.mark.needs_torch),
-]
 
+@dataclass(frozen=True)
+class Container:
+    """One kind of array a kernel can be handed: how to build it, and how to read it back for comparison.
 
-def _host_array(kind, n, fill):
-    """Build an `n`-element int32 container of `kind` with every element preset to `fill`.
-
-    `fill` must be non-zero for any test that checks untouched elements: the corruption being guarded against shows up
-    as zeros, so a zero preset makes the broken and correct results identical.
+    `make(n, fill)` returns an `n`-element int32 array with every element preset to `fill`. Pass a non-zero `fill` in
+    any test that checks untouched elements: the corruption being guarded against shows up as zeros, so a zero preset
+    makes the broken and correct results identical.
     """
-    if kind == "numpy":
-        return np.full((n,), fill, dtype=np.int32)
-    if kind == "torch":
-        torch = pytest.importorskip("torch")
-        # Deliberately a CPU tensor: one already resident on the compute device skips the staging path under test.
-        return torch.full((n,), fill, dtype=torch.int32)
-    raise AssertionError(f"unknown container kind {kind!r}")
+
+    make: Callable[[int, int], Any]
+    to_numpy: Callable[[Any], np.ndarray]
 
 
-def _as_numpy(arr, kind):
-    if kind == "numpy":
-        return arr
-    return arr.cpu().numpy()
+def _make_numpy(n, fill):
+    return np.full((n,), fill, dtype=np.int32)
+
+
+def _make_torch(n, fill):
+    # Imported here rather than at module scope so the file collects without torch installed. Deliberately a CPU
+    # tensor: one already resident on the compute device skips the staging path under test.
+    torch = pytest.importorskip("torch")
+    return torch.full((n,), fill, dtype=torch.int32)
+
+
+CONTAINERS = [
+    pytest.param(Container(make=_make_numpy, to_numpy=lambda arr: arr), id="numpy"),
+    pytest.param(
+        Container(make=_make_torch, to_numpy=lambda arr: arr.cpu().numpy()),
+        id="torch",
+        marks=pytest.mark.needs_torch,
+    ),
+]
 
 
 @test_utils.test()
@@ -48,12 +59,12 @@ def test_conditional_store_preserves_untouched_elements(container):
             if pid % 2 == 0:
                 out[pid] = stored
 
-    out = _host_array(container, 8, preset)
+    out = container.make(8, preset)
 
     store_even_lanes(out)
 
     expected = np.array([stored, preset] * 4, dtype=np.int32)
-    np.testing.assert_array_equal(_as_numpy(out, container), expected)
+    np.testing.assert_array_equal(container.to_numpy(out), expected)
 
 
 @test_utils.test()
@@ -73,12 +84,12 @@ def test_partial_range_store_preserves_tail(container):
         for pid in range(count):
             out[pid] = stored
 
-    out = _host_array(container, 8, preset)
+    out = container.make(8, preset)
 
     store_prefix(out, 4)
 
     expected = np.array([stored] * 4 + [preset] * 4, dtype=np.int32)
-    np.testing.assert_array_equal(_as_numpy(out, container), expected)
+    np.testing.assert_array_equal(container.to_numpy(out), expected)
 
 
 @test_utils.test()
@@ -104,13 +115,13 @@ def test_disjoint_writes_accumulate_across_launches(container):
             if pid % 2 == 1:
                 out[pid] = second
 
-    out = _host_array(container, 8, preset)
+    out = container.make(8, preset)
 
     store_even_lanes(out)
     store_odd_lanes(out)
 
     expected = np.array([first, second] * 4, dtype=np.int32)
-    np.testing.assert_array_equal(_as_numpy(out, container), expected)
+    np.testing.assert_array_equal(container.to_numpy(out), expected)
 
 
 @test_utils.test()
@@ -125,12 +136,12 @@ def test_read_modify_write_is_unaffected(container):
         for pid in range(out.shape[0]):
             out[pid] = out[pid] + 1
 
-    out = _host_array(container, 8, preset)
+    out = container.make(8, preset)
 
     increment_every_element(out)
 
     expected = np.full((8,), preset + 1, dtype=np.int32)
-    np.testing.assert_array_equal(_as_numpy(out, container), expected)
+    np.testing.assert_array_equal(container.to_numpy(out), expected)
 
 
 @test_utils.test()
@@ -145,10 +156,10 @@ def test_read_only_argument_is_not_clobbered(container):
         for pid in range(src.shape[0]):
             dst[0] += src[pid]
 
-    src = _host_array(container, 8, preset)
-    dst = _host_array(container, 1, 0)
+    src = container.make(8, preset)
+    dst = container.make(1, 0)
 
     sum_into_first_element(src, dst)
 
-    np.testing.assert_array_equal(_as_numpy(src, container), np.full((8,), preset, dtype=np.int32))
-    np.testing.assert_array_equal(_as_numpy(dst, container), np.array([8 * preset], dtype=np.int32))
+    np.testing.assert_array_equal(container.to_numpy(src), np.full((8,), preset, dtype=np.int32))
+    np.testing.assert_array_equal(container.to_numpy(dst), np.array([8 * preset], dtype=np.int32))
