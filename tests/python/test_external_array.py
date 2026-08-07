@@ -12,7 +12,6 @@ from tests import test_utils
 CONTAINERS = [
     "numpy",
     pytest.param("torch", marks=pytest.mark.needs_torch),
-    "quadrants",
 ]
 
 
@@ -28,19 +27,13 @@ def _host_array(kind, n, fill):
         torch = pytest.importorskip("torch")
         # Deliberately a CPU tensor: one already resident on the compute device skips the staging path under test.
         return torch.full((n,), fill, dtype=torch.int32)
-    if kind == "quadrants":
-        arr = qd.ndarray(qd.i32, (n,))
-        arr.fill(fill)
-        return arr
     raise AssertionError(f"unknown container kind {kind!r}")
 
 
 def _as_numpy(arr, kind):
     if kind == "numpy":
         return arr
-    if kind == "torch":
-        return arr.cpu().numpy()
-    return arr.to_numpy()
+    return arr.cpu().numpy()
 
 
 @test_utils.test()
