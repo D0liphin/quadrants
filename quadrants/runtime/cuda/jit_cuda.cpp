@@ -1,3 +1,5 @@
+#include <mutex>
+#include <thread>
 #include <atomic>
 #include <chrono>
 #include <iterator>
@@ -305,6 +307,18 @@ static std::vector<char> ptx_to_relocatable_cubin(const std::string &ptx, const 
   return bytes;
 }
 
+// Aggregated per-task cubin-build timings (diagnostic; see get_or_build_construct_cubin).
+static std::atomic<double> g_ptxgen_ms{0.0}, g_ptxas_ms{0.0};
+// LLVM->PTX stays serialised: the per-task modules are produced on the codegen worker threads and may share an
+// LLVMContext, which is not safe for concurrent codegen. `ptxas` runs outside this lock -- it is a subprocess on
+// private temp files and is where the cost actually is.
+static std::mutex g_ptxgen_mu;
+static void add_ms(std::atomic<double> &acc, double v) {
+  double cur = acc.load(std::memory_order_relaxed);
+  while (!acc.compare_exchange_weak(cur, cur + v, std::memory_order_relaxed)) {
+  }
+}
+
 // Per-construct relocatable-cubin disk cache. A warm run with an unchanged construct hits the cache and skips PTX +
 // ptxas entirely. Directory from QD_CULINK_CUBIN_DIR, else <offline_cache>/culink_cubins_sm_<cc>, else
 // /tmp/qd_culink_cubins_sm_<cc>.
@@ -350,12 +364,28 @@ std::vector<char> JITSessionCUDA::get_or_build_construct_cubin(std::unique_ptr<l
     std::ifstream in(cubin_path, std::ios::binary);
     return std::vector<char>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   }
-  auto ptx = compile_module_to_ptx(module);
+  auto _t0 = Time::get_time();
+  std::string ptx;
+  {
+    std::lock_guard<std::mutex> g(g_ptxgen_mu);
+    ptx = compile_module_to_ptx(module);
+  }
+  add_ms(g_ptxgen_ms, (Time::get_time() - _t0) * 1000);
+  return assemble_and_store_cubin(ptx, cubin_path.string());
+}
+
+std::vector<char> JITSessionCUDA::assemble_and_store_cubin(const std::string &ptx, const std::string &cubin_path) {
+  namespace fs = std::filesystem;
+  // `ptxas -c` in a subprocess on private temp files: no shared state, so this is safe to call concurrently and is
+  // where the cold cost lives (9.8 s of a 13.7 s per-task cubin build on the genesis kernel, vs 1.6 s for LLVM->PTX).
+  auto _t0 = Time::get_time();
   auto cubin = ptx_to_relocatable_cubin(ptx, CUDAContext::get_instance().get_mcpu());
+  add_ms(g_ptxas_ms, (Time::get_time() - _t0) * 1000);
   // atomic-ish write via temp + rename so concurrent builders don't read a partial cubin
-  auto tmp = cubin_path.string() + fmt::format(".tmp{}", (unsigned long long)std::chrono::steady_clock::now()
-                                                              .time_since_epoch()
-                                                              .count());
+  std::error_code ec;
+  auto tmp = cubin_path + fmt::format(".tmp{}", (unsigned long long)std::chrono::steady_clock::now()
+                                                    .time_since_epoch()
+                                                    .count());
   {
     std::ofstream o(tmp, std::ios::binary);
     o.write(cubin.data(), (std::streamsize)cubin.size());
@@ -389,7 +419,29 @@ JITModule *JITSessionCUDA::add_module_culink(std::vector<PerConstructArtifact> a
   auto t_ptx0 = Time::get_time();
   int n_prebuilt = 0;
   if (use_cubin) {
-    for (auto &art : artifacts) {
+    // Build the per-task cubins concurrently. This is the cold-path cost: 242 serial `ptxas -c` shell-outs were
+    // 9.8 s of a 13.7 s cubin build on the genesis kernel (LLVM->PTX was only 1.6 s and stays serialised inside).
+    // Each entry writes only its own slot, so no synchronisation is needed beyond the ptxgen lock.
+    std::vector<std::vector<char>> built(artifacts.size());
+    {
+      std::atomic<std::size_t> next{0};
+      const unsigned nthreads =
+          std::min<unsigned>(std::max(1u, std::thread::hardware_concurrency()), (unsigned)artifacts.size());
+      std::vector<std::thread> pool;
+      for (unsigned t = 0; t < nthreads; t++) {
+        pool.emplace_back([&]() {
+          for (std::size_t i = next.fetch_add(1); i < artifacts.size(); i = next.fetch_add(1)) {
+            if (artifacts[i].cubin.empty()) {
+              built[i] = get_or_build_construct_cubin(artifacts[i].module, artifacts[i].key);
+            }
+          }
+        });
+      }
+      for (auto &th : pool)
+        th.join();
+    }
+    for (std::size_t ai = 0; ai < artifacts.size(); ai++) {
+      auto &art = artifacts[ai];
       if (!art.cubin.empty()) {
         // Already resolved from the on-disk artifact cache by the codegen driver: no module was ever built for this
         // task, so there is nothing to compile or store.
@@ -397,7 +449,7 @@ JITModule *JITSessionCUDA::add_module_culink(std::vector<PerConstructArtifact> a
         n_prebuilt++;
         continue;
       }
-      auto cubin = get_or_build_construct_cubin(art.module, art.key);
+      auto cubin = std::move(built[ai]);
       // Persist the COMPLETE record (code + launch metadata). The JIT is the only component that holds the cubin,
       // and codegen is the only one that holds the metadata, so the metadata is carried down here on the artifact
       // specifically so this side can write a record that is sufficient to launch the task without any recompile.
@@ -467,9 +519,9 @@ JITModule *JITSessionCUDA::add_module_culink(std::vector<PerConstructArtifact> a
   if (phase_time) {
     QD_INFO(
         "[phase-time] culink-pertask mode={} n_tasks={} prebuilt_from_artifact_cache={} cubin_build_all={:.1f}ms "
-        "culink={:.1f}ms module_load={:.1f}ms linked_cubin={:.1f}KB",
+        "culink={:.1f}ms module_load={:.1f}ms ptxgen={:.1f}ms ptxas={:.1f}ms linked_cubin={:.1f}KB",
         use_cubin ? "cubin-cache" : "ptx", (int)artifacts.size(), n_prebuilt, (t_ptx1 - t_ptx0) * 1000,
-        (t_link1 - t_link0) * 1000, (t_load1 - t_link1) * 1000, cubin_sz / 1024.0);
+        (t_link1 - t_link0) * 1000, (t_load1 - t_link1) * 1000, g_ptxgen_ms.load(), g_ptxas_ms.load(), cubin_sz / 1024.0);
   }
 
   this->modules.push_back(std::make_unique<JITModuleCUDA>(cuda_module));

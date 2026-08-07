@@ -70,6 +70,9 @@ class JITSessionCUDA : public JITSession {
   // warm unchanged construct). `ir_key` is the per-task IR cache key (§9.D Part B); when empty we fall back to the
   // slice-1b prototype behavior of hashing the module's LLVM-IR text.
   std::vector<char> get_or_build_construct_cubin(std::unique_ptr<llvm::Module> &module, const std::string &ir_key);
+  // `ptxas -c` + atomic write of the result. Split out from the above because it holds no shared state and so can be
+  // called concurrently, which is what makes the cold per-task cubin build parallel.
+  std::vector<char> assemble_and_store_cubin(const std::string &ptx, const std::string &cubin_path);
   llvm::DataLayout get_data_layout() override;
 
  private:
