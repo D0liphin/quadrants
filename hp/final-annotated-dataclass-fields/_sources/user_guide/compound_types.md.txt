@@ -185,7 +185,7 @@ Semantics of a `Final[T]` field:
 Restrictions:
 
 - **The class must be frozen** (`frozen=True`, or `unsafe_hash=True` if you must keep it mutable and take responsibility for never reassigning these fields). A baked value must not be reassignable; a plain non-frozen `@dataclass` is rejected with an error.
-- **`T` must be a value Quadrants can bake as a literal**: `bool`, `int`, `float`, `str`, or an `enum.Enum` subclass. Arrays, `qd.dataclass` structs, `qd.Tensor`, nested dataclasses and arbitrary objects are rejected. To make a nested dataclass's leaves compile-time, mark those leaf fields `Final` rather than the nested field itself.
+- **`T` must be a value Quadrants can bake as a literal**: `bool`, `int`, `float`, `str`, or an `enum.Enum` subclass. Arrays, `qd.dataclass` structs, [`qd.Tensor`](tensor.md), nested dataclasses and arbitrary objects are rejected. To make a nested dataclass's leaves compile-time, mark those leaf fields `Final` rather than the nested field itself.
 - **String annotations are rejected.** `from __future__ import annotations` leaves the annotation unresolved, so Quadrants cannot see the `Final` and would silently lower the field as a runtime argument. This raises rather than silently doing the wrong thing.
 
 If you want the opposite trade-off for a `@qd.data_oriented` class (primitive members that are *runtime* rather than baked), see [Runtime primitives: `template_primitives=False`](#runtime-primitives-template_primitivesfalse).
