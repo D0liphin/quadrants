@@ -121,7 +121,7 @@ Each compiled artifact is stored under a key derived from all of the following:
 - The **Quadrants version** (`quadrants.__version__`).
 - The **source code** of the kernel function or any `@qd.func` it calls.
 - The **argument types** (e.g. switching from `f32` to `f64`, or changing ndarray dimensionality).
-- The **compiler configuration** (e.g. `arch`, `debug`, `opt_level`, `fast_math`).
+- The **compilation-relevant parts of the compiler configuration** (e.g. `arch`, `debug`, `opt_level`, `fast_math`). Options that cannot change the generated code are deliberately excluded, so that toggling them does not force a recompile: the `print_*` and `verbose_*` debug options, the `offline_cache*` options, `debug_dump_path` (only chooses the directory IR dumps are written to) and `cuda_stack_limit` (only sets a CUDA context limit at runtime).
 - **Template parameter values** (since they are baked into the compiled kernel).
 
 When any of these change, the resulting key is different, so a new compilation occurs and a new entry is stored. Previous entries remain on disk - multiple cached versions coexist. You do not need to manually clear the cache when making code changes - the hash mismatch causes a transparent recompilation.
