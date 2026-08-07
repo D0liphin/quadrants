@@ -9,10 +9,6 @@ import quadrants as qd
 
 from tests import test_utils
 
-# The bug lives in the shared gfx runtime, so Metal and Vulkan are the interesting backends. CPU is included as a
-# control: it uses the host array in place and has always been correct.
-ARCHS = [qd.cpu, qd.metal, qd.vulkan]
-
 # `quadrants` is the reference container: already device-resident, so it skips staging entirely and passes even on a
 # broken build. Keeping it in the same parametrization makes the asymmetry explicit and guards against a "fix" that
 # regresses the path which already worked. Only the torch case carries `needs_torch`; marking the whole test would
@@ -50,7 +46,7 @@ def _as_numpy(arr, kind):
     return arr.to_numpy()
 
 
-@test_utils.test(arch=ARCHS)
+@test_utils.test()
 @pytest.mark.parametrize("container", CONTAINERS)
 def test_conditional_store_preserves_untouched_elements(container):
     """The reproducer from quadrants#841: only the even lanes are stored to, so the odd lanes must survive."""
@@ -69,7 +65,7 @@ def test_conditional_store_preserves_untouched_elements(container):
     np.testing.assert_array_equal(_as_numpy(out, container), expected)
 
 
-@test_utils.test(arch=ARCHS)
+@test_utils.test()
 @pytest.mark.parametrize("container", CONTAINERS)
 def test_partial_range_store_preserves_tail(container):
     """The trigger is the access pattern, not the conditional: an unconditional store over a loop covering only the
@@ -93,7 +89,7 @@ def test_partial_range_store_preserves_tail(container):
     np.testing.assert_array_equal(_as_numpy(out, container), expected)
 
 
-@test_utils.test(arch=ARCHS)
+@test_utils.test()
 @pytest.mark.parametrize("container", CONTAINERS)
 def test_disjoint_writes_accumulate_across_launches(container):
     """Two launches, each writing a disjoint half, must compose. The staging buffer is allocated per launch and carries
@@ -121,7 +117,7 @@ def test_disjoint_writes_accumulate_across_launches(container):
     np.testing.assert_array_equal(_as_numpy(out, container), expected)
 
 
-@test_utils.test(arch=ARCHS)
+@test_utils.test()
 @pytest.mark.parametrize("container", CONTAINERS)
 def test_read_modify_write_is_unaffected(container):
     """Control. A real load sets the mask's READ bit, so this path was always correct. It is here so that a failure of
@@ -140,7 +136,7 @@ def test_read_modify_write_is_unaffected(container):
     np.testing.assert_array_equal(_as_numpy(out, container), expected)
 
 
-@test_utils.test(arch=ARCHS)
+@test_utils.test()
 @pytest.mark.parametrize("container", CONTAINERS)
 def test_read_only_argument_is_not_clobbered(container):
     """Control. A read-only argument has the WRITE bit clear, so no readback happens and the caller's array must come
