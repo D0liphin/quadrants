@@ -265,26 +265,6 @@ y = torch.zeros(32, dtype=torch.float32, device="cuda:0")
 square(x, y)
 ```
 
-### Partial writes
-
-A kernel need not write every element of an output tensor. Elements the kernel does not write keep the values they had before the launch, so it is safe to write a slice under a condition, or to build one output up across several kernel launches:
-
-```python
-@qd.kernel
-def fill_evens(out: qd.types.ndarray()) -> None:
-    for i in range(out.shape[0]):
-        if i % 2 == 0:
-            out[i] = 42.0
-
-y = torch.full((8,), 7.0, dtype=torch.float32)
-fill_evens(y)
-print(y)  # [42, 7, 42, 7, 42, 7, 42, 7] - the odd elements are untouched
-```
-
-This holds for `numpy.ndarray` arguments and for `qd.ndarray` as well, on every backend.
-
-**Note.** On the Metal and Vulkan backends, a tensor that lives in host memory is copied to the device before the kernel and back afterwards, once per launch. Passing a large host tensor to a kernel you call in a hot loop therefore costs two copies of it every launch. To avoid them, use a `qd.ndarray`, or a tensor already resident on the compute device, so that the kernel can operate on the memory in place.
-
 ### Integration with torch.autograd
 
 Since torch tensors can be passed directly into kernels, you can integrate Quadrants kernels into PyTorch's autograd system by wrapping them in a `torch.autograd.Function`:
