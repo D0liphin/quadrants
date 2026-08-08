@@ -213,8 +213,8 @@ static std::vector<char> ptx_to_relocatable_cubin(const std::string &ptx, const 
 static std::mutex g_ptxgen_mu;
 
 // Per-construct relocatable-cubin disk cache. A warm run with an unchanged construct hits the cache and skips PTX +
-// ptxas entirely. Directory from QD_CULINK_CUBIN_DIR, else <offline_cache>/culink_cubins_sm_<cc>, else
-// /tmp/qd_culink_cubins_sm_<cc>.
+// ptxas entirely. Directory is <offline_cache>/culink_cubins_sm_<cc>, or /tmp/qd_culink_cubins_sm_<cc> when the
+// offline cache is disabled.
 //
 // §9.D Part B: the key is the caller-supplied per-task IR key (`get_hashed_per_task_cache_key` + "#index"), computed
 // from the *task IR before codegen*. That is the edit-stable key -- an unchanged task hits it on a warm edit even
@@ -228,21 +228,16 @@ std::vector<char> JITSessionCUDA::get_or_build_construct_cubin(std::unique_ptr<l
                                                                const std::string &ir_key) {
   namespace fs = std::filesystem;
   const std::string mcpu = CUDAContext::get_instance().get_mcpu();
-  std::string dir = []() {
-    const char *e = std::getenv("QD_CULINK_CUBIN_DIR");
-    return e != nullptr ? std::string(e) : std::string();
-  }();
-  if (dir.empty()) {
-    const std::string leaf = "culink_cubins_" + mcpu;
-    dir = config_.offline_cache_file_path.empty() ? ("/tmp/qd_" + leaf) : (config_.offline_cache_file_path + "/" + leaf);
-  }
+  const std::string leaf = "culink_cubins_" + mcpu;
+  const std::string dir =
+      config_.offline_cache_file_path.empty() ? ("/tmp/qd_" + leaf) : (config_.offline_cache_file_path + "/" + leaf);
   std::error_code ec;
   fs::create_directories(dir, ec);
 
   std::string key;
   if (!ir_key.empty()) {
     // Hash the IR key (rather than using it raw) so the filename is a fixed-length hex string regardless of the
-    // key's prefix/suffix shape, and so fast_math/mcpu are folded in even when the dir is overridden.
+    // key's prefix/suffix shape, and so fast_math/mcpu are folded into the name and not just the directory.
     key = ptx_cache_->make_cache_key(ir_key + "|" + mcpu, config_.fast_math);
   } else {
     std::string llvm_ir_str;

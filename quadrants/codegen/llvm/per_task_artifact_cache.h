@@ -105,11 +105,8 @@ class PerTaskArtifactCache {
 
 // Single source of truth for where per-task artifacts live. The codegen driver (probe side) and the CUDA JIT (store
 // side) run in different layers and must resolve the same directory, so both call this rather than each building a
-// path. `QD_PERTASK_ARTIFACT_DIR` overrides, mainly so tests can point at a scratch dir.
+// path. Point `offline_cache_file_path` somewhere fresh to get a cold read of this tier.
 inline std::string pertask_artifact_dir_for(const std::string &offline_cache_file_path) {
-  if (const char *e = std::getenv("QD_PERTASK_ARTIFACT_DIR")) {
-    return std::string(e);
-  }
   if (offline_cache_file_path.empty()) {
     return std::string("/tmp/qd_pertask_artifacts");
   }
@@ -129,9 +126,6 @@ inline void set_pertask_artifact_dir_from_offline_cache(const std::string &offli
 }
 
 inline std::string resolved_pertask_artifact_dir() {
-  if (const char *e = std::getenv("QD_PERTASK_ARTIFACT_DIR")) {
-    return std::string(e);
-  }
   const auto &d = pertask_artifact_dir_ref();
   return d.empty() ? pertask_artifact_dir_for(std::string()) : d;
 }

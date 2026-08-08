@@ -79,10 +79,8 @@ class ConstructManifestCache {
   std::string dir_;
 };
 
+// Point `offline_cache_file_path` somewhere fresh to get a cold read of this tier.
 inline std::string construct_manifest_dir_for(const std::string &offline_cache_file_path) {
-  if (const char *e = std::getenv("QD_CONSTRUCT_MANIFEST_DIR")) {
-    return std::string(e);
-  }
   if (offline_cache_file_path.empty()) {
     return std::string("/tmp/qd_construct_manifests");
   }
