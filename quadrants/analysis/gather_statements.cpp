@@ -22,6 +22,14 @@ class StmtSearcher : public BasicStmtVisitor {
       results_.push_back(stmt);
   }
 
+  // Container statements never reach `visit(Stmt *)`: `BasicStmtVisitor` claims each of them with a typed overload
+  // that recurses into the body. Without this hook a predicate written against `MeshForStmt`, `StructForStmt`,
+  // `RangeForStmt`, `IfStmt`, `WhileStmt` or `OffloadedStmt` silently never matches.
+  void preprocess_container_stmt(Stmt *stmt) override {
+    if (test_(stmt))
+      results_.push_back(stmt);
+  }
+
   static std::vector<Stmt *> run(IRNode *root, const std::function<bool(Stmt *)> &test) {
     StmtSearcher searcher(test);
     root->accept(&searcher);
