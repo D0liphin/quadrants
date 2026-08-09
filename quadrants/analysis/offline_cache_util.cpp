@@ -245,9 +245,13 @@ std::vector<const SNode *> gather_task_snode_roots(OffloadedStmt *task) {
     }
     return false;
   });
-  if (task->task_type == OffloadedTaskType::struct_for) {
-    add(task->snode);
-  }
+  // `listgen` and `gc` carry their target on the offload header and have all but empty bodies, so the printed IR
+  // distinguishes them only by the SNode's auto-generated *name* -- and those names are a function of the tree's
+  // shape, not its extents or axes. Two different layouts that happen to nest the same node types (say
+  // root->pointer->dense over `i` vs over `ij`) therefore print identically and, without this, hash identically,
+  // while their compiled struct-access arithmetic differs. Fold the header SNode for every task type that has one;
+  // over-approximating costs only dedup precision.
+  add(task->snode);
   std::vector<const SNode *> out;
   out.reserve(roots.size());
   for (const auto &[tree_id, root] : roots) {
