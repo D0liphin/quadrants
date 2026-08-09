@@ -621,8 +621,14 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
 
   void create_bls_buffer(OffloadedStmt *stmt) {
     auto type = llvm::ArrayType::get(llvm::Type::getInt8Ty(*llvm_context), stmt->bls_size);
-    bls_buffer = new GlobalVariable(*module, type, false, llvm::GlobalValue::ExternalLinkage, nullptr, "bls_buffer",
-                                    nullptr, llvm::GlobalVariable::NotThreadLocal, 3 /*addrspace=shared*/);
+    // Internal definition rather than an external declaration, for the same reason as the static shared scratch in
+    // `visit(AllocaStmt *)` above: `.extern .shared` is an unresolved symbol under relocatable device linking
+    // (`ptxas -c` + `cuLink`), so a per-task cubin referencing it fails cuLinkComplete with "Undefined reference to
+    // 'bls_buffer'". BLS is always statically sized (`bls_size`, and this is only reached when it is non-zero), so
+    // it never needs the runtime-sized `extern __shared__` form.
+    bls_buffer = new GlobalVariable(*module, type, false, llvm::GlobalValue::InternalLinkage,
+                                    llvm::UndefValue::get(type), "bls_buffer", nullptr,
+                                    llvm::GlobalVariable::NotThreadLocal, 3 /*addrspace=shared*/);
     bls_buffer->setAlignment(llvm::MaybeAlign(8));
   }
 
