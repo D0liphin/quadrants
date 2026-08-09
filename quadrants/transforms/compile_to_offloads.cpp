@@ -44,11 +44,32 @@ void run_construct_frontend(IRNode *cb, const CompileConfig &config, const Kerne
   irpass::full_simplify(cb, config, {false, /*autodiff_enabled*/ false, name, verbose, "simplify_III"});
 }
 
+// Deliberately a visitor rather than `gather_statements`: that helper only ever runs its predicate from
+// `visit(Stmt *)`, and `BasicStmtVisitor` claims the container statements (`MeshForStmt`, `StructForStmt`,
+// `RangeForStmt`, `IfStmt`, `WhileStmt`, `OffloadedStmt`) with typed overloads that recurse into the body without
+// consulting the predicate. A `gather_statements` test for any of those types therefore never matches -- which is
+// exactly how this guard silently passed every mesh kernel into the split.
+class MeshForFinder : public BasicStmtVisitor {
+ public:
+  using BasicStmtVisitor::visit;
+  bool found{false};
+
+  MeshForFinder() {
+    allow_undefined_visitor = true;
+    invoke_default_visitor = true;
+  }
+
+  void visit(MeshForStmt *stmt) override {
+    found = true;
+  }
+};
+
 bool block_has_mesh_for(Block *block) {
   if (block == nullptr)
     return false;
-  auto sub = irpass::analysis::gather_statements(block, [](Stmt *s) { return s->is<MeshForStmt>(); });
-  return !sub.empty();
+  MeshForFinder finder;
+  block->accept(&finder);
+  return finder.found;
 }
 
 // Resolve a local pointer (an AllocaStmt, or a MatrixPtrStmt into one) to its base AllocaStmt. Returns nullptr when the
