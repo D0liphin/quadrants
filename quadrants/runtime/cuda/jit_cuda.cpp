@@ -248,14 +248,30 @@ std::vector<char> JITSessionCUDA::get_or_build_construct_cubin(std::unique_ptr<l
   }
   auto cubin_path = fs::path(dir) / (key + ".cubin");
 
-  if (fs::exists(cubin_path)) {
+  // The whole-module loader dumps each module's PTX under `debug_dump_path`; this path replaces it for every CUDA
+  // kernel, so it has to dump too or `QD_DUMP_IR=1` silently stops producing PTX. A cached cubin skips PTX
+  // generation altogether, so when dumps are requested bypass the cache -- an explicit debug flag should give a
+  // complete set of artifacts rather than whatever survived from an earlier run.
+  const char *dump_ir_env = std::getenv(DUMP_IR_ENV.data());
+  const bool dump_ir = dump_ir_env != nullptr && std::string(dump_ir_env) == "1";
+
+  if (!dump_ir && fs::exists(cubin_path)) {
     std::ifstream in(cubin_path, std::ios::binary);
     return std::vector<char>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   }
+  // Captured before compile_module_to_ptx, which renames functions via convert().
+  const std::string dump_name = dump_ir ? moduleToDumpName(module.get()) : std::string();
   std::string ptx;
   {
     std::lock_guard<std::mutex> g(g_ptxgen_mu);
     ptx = compile_module_to_ptx(module);
+  }
+  if (dump_ir && !dump_name.empty()) {
+    fs::path ir_dump_dir = config_.debug_dump_path;
+    fs::create_directories(ir_dump_dir, ec);
+    if (std::ofstream out(ir_dump_dir / (dump_name + ".ptx")); out.is_open()) {
+      out << ptx << std::endl;
+    }
   }
   return assemble_and_store_cubin(ptx, cubin_path.string());
 }
