@@ -209,6 +209,25 @@ void split_frontend_per_construct(IRNode *ir, const CompileConfig &config, const
   }
   const int n_segs = (int)seg_emits_task.size();
 
+  // Top-level writers of each local variable, for the backward slice below. A `LocalLoadStmt`'s only operand is the
+  // alloca (or a `MatrixPtrStmt` into it), never the store that gave it its value, so an operand-closed slice pulls in
+  // a bare, zero-initialized alloca and silently reads zeros. `split_is_recompute_safe` has already rejected kernels
+  // where a local is produced *inside* another construct's loop, so every writer that matters here is top-level and
+  // safe to recompute into the consuming construct.
+  std::unordered_map<Stmt *, std::vector<Stmt *>> alloca_writers;
+  for (int j = 0; j < n; j++) {
+    Stmt *s = block->statements[j].get();
+    Stmt *dest = nullptr;
+    if (auto *st = s->cast<LocalStoreStmt>())
+      dest = st->dest;
+    else if (auto *at = s->cast<AtomicOpStmt>())
+      dest = at->dest;
+    if (dest == nullptr)
+      continue;
+    if (Stmt *a = resolve_local_alloca(dest))
+      alloca_writers[a].push_back(s);
+  }
+
   // S2 step C (§9.C): program-scoped per-construct FRONTEND cache. On a warm compile only the changed construct's
   // frontend re-runs; unchanged constructs are cloned out of the cache, skipping simplify/mgp/offload. Content-keyed,
   // so identical constructs across kernels (same ABI/config) share entries. Default on whenever the split runs;
@@ -255,15 +274,17 @@ void split_frontend_per_construct(IRNode *ir, const CompileConfig &config, const
     // when every construct is a cache hit, since the isolated construct is what the key is computed from.
     std::unordered_set<Stmt *> needed;
     std::vector<Stmt *> worklist;
+    auto add_with_subtree = [&needed, &worklist](Stmt *s) {
+      if (needed.insert(s).second)
+        worklist.push_back(s);
+      for (Stmt *sub : irpass::analysis::gather_statements(s, [](Stmt *) { return true; }))
+        if (needed.insert(sub).second)
+          worklist.push_back(sub);
+    };
     for (int j = 0; j < n; j++) {
       if (seg_id[j] != k)
         continue;
-      Stmt *tlj = block->statements[j].get();
-      if (needed.insert(tlj).second)
-        worklist.push_back(tlj);
-      for (Stmt *sub : irpass::analysis::gather_statements(tlj, [](Stmt *) { return true; }))
-        if (needed.insert(sub).second)
-          worklist.push_back(sub);
+      add_with_subtree(block->statements[j].get());
     }
     while (!worklist.empty()) {
       Stmt *s = worklist.back();
@@ -271,6 +292,15 @@ void split_frontend_per_construct(IRNode *ir, const CompileConfig &config, const
       for (Stmt *op : s->get_operands())
         if (op != nullptr && needed.insert(op).second)
           worklist.push_back(op);
+      // Reaching an alloca means this construct reads the local; bring its top-level writers (and their own operand
+      // chains) along, or the construct compiles against an uninitialized variable.
+      if (s->is<AllocaStmt>()) {
+        auto it = alloca_writers.find(s);
+        if (it != alloca_writers.end()) {
+          for (Stmt *w : it->second)
+            add_with_subtree(w);
+        }
+      }
     }
     std::vector<int> keep_indices;
     for (int j = 0; j < n; j++) {
