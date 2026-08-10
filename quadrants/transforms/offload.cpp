@@ -13,7 +13,6 @@
 #include <algorithm>
 #include <typeinfo>
 #include <cstdint>
-#include <cstdlib>
 #include <string>
 
 namespace quadrants::lang {
