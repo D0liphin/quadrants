@@ -3616,6 +3616,43 @@ def test_final_field_int_annotation_holding_intenum_value():
 
 
 @test_utils.test()
+def test_final_float_field_honors_raise_on_templated_floats():
+    """``raise_on_templated_floats`` exists to stop float values from driving kernel specialisation, since each
+    distinct value compiles another kernel. A ``Final[float]`` field does exactly that, so it must honour the setting
+    the same way a ``qd.template()`` float does.
+
+    Note this is deliberately *stricter* than the ``@qd.data_oriented`` pattern ``Final`` replaces: a float member of
+    a data_oriented template arg currently bypasses the guard, because ``_extract_arg``'s data_oriented branch returns
+    ``weakref.ref(arg)`` before reaching the float check. That gap is pre-existing and out of scope here; the point of
+    this test is that the new annotation does not inherit it."""
+    from typing import Final
+
+    arch_name = qd.lang.impl.current_cfg().arch.name
+
+    @dataclass(frozen=True)
+    class Cfg:
+        dt: Final[float]
+        n: Final[int]
+
+    def run(cfg):
+        @qd.kernel
+        def k(config: Cfg, out: qd.types.NDArray[qd.i32, 1]):
+            v = qd.static(config.n)
+            for i in out:
+                out[i] = v
+
+        k(cfg, qd.ndarray(qd.i32, shape=(2,)))
+
+    qd.init(arch=getattr(qd, arch_name), raise_on_templated_floats=True)
+    with pytest.raises(ValueError, match="Floats not allowed as templated types"):
+        run(Cfg(dt=0.5, n=3))
+
+    # Default setting: the same config compiles fine, and the Final int still specialises.
+    qd.init(arch=getattr(qd, arch_name))
+    run(Cfg(dt=0.5, n=3))
+
+
+@test_utils.test()
 def test_final_field_string_annotation_is_rejected():
     """``from __future__ import annotations`` (or any explicit string annotation) leaves ``field.type`` as an
     unresolved string, so Quadrants cannot see the ``Final`` and would silently lower the field as a *runtime* kernel

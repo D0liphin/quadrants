@@ -408,22 +408,35 @@ def _extract_arg(raise_on_templated_floats: bool, arg: Any, annotation: Annotati
         # else. Frozen dataclasses short-circuit even that via the ``arg._key`` cache above.
         final_names = final_field_names(annotation)
         if final_names:
-            key = tuple(
-                [
-                    (
-                        getattr(arg, field.name)
-                        if field.name in final_names
-                        else _extract_arg(
+            key_parts = []
+            for field in annotation_fields.values():
+                if field._field_type is not _FIELD:
+                    continue
+                field_value = getattr(arg, field.name)
+                if field.name in final_names:
+                    # ``raise_on_templated_floats`` exists to stop float values from driving kernel specialisation,
+                    # since each distinct value compiles another kernel. A ``Final[float]`` field does exactly that,
+                    # so it has to honour the setting like a ``qd.template()`` float does (the check below the
+                    # template branch, ~line 297). ``type(...) is float`` matches that check exactly, both for
+                    # consistency and because it is a pointer compare rather than an MRO walk.
+                    if raise_on_templated_floats and type(field_value) is float:
+                        raise ValueError(
+                            f"Floats not allowed as templated types: {annotation.__name__}.{field.name} is "
+                            f"``Final[float]``, so its value is baked into the compiled kernel and each distinct "
+                            f"value compiles a separate kernel. Drop the ``Final`` to make it an ordinary runtime "
+                            f"field, or unset ``raise_on_templated_floats``."
+                        )
+                    key_parts.append(field_value)
+                else:
+                    key_parts.append(
+                        _extract_arg(
                             raise_on_templated_floats,
-                            getattr(arg, field.name),
+                            field_value,
                             field.type,
                             create_flat_name(arg_name, field.name),
                         )
                     )
-                    for field in annotation_fields.values()
-                    if field._field_type is _FIELD
-                ]
-            )
+            key = tuple(key_parts)
         else:
             key = tuple(
                 [
