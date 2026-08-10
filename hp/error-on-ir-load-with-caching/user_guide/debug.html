@@ -462,7 +462,7 @@
 </div>
 <section id="adstack-overflow">
 <h4>Adstack overflow<a class="headerlink" href="#adstack-overflow" title="Link to this heading">#</a></h4>
-<p>The adstack overflow check on reverse-mode autodiff runs always, on every backend, regardless of <code class="docutils literal notranslate"><span class="pre">debug</span></code>. A push past the per-stack capacity raises <code class="docutils literal notranslate"><span class="pre">QuadrantsAssertionError(&quot;[Aa]dstack</span> <span class="pre">overflow&quot;)</span></code> at the next Quadrants Python entry that polls the overflow flag after the offending kernel has executed - kernel launch, host-side field / ndarray read, or <code class="docutils literal notranslate"><span class="pre">qd.sync()</span></code>. On CPU this is the entry of the offending launch itself; on GPU it can be one or more entries later, since the GPU may not have run the offending push by the time the poll at end-of-launch fires. The error message describes the cause (untracked tensor mutation between launches, or sizer under-estimate caused by a bug in Quadrants) and the recovery flow; see <a class="reference internal" href="autodiff.html"><span class="std std-doc">Autodiff -&gt; What can go wrong</span></a> for the full description.</p>
+<p>The adstack is the per-thread stack that reverse-mode autodiff uses to save the intermediate values a kernel produces, so that the backward pass can read them back. Its overflow check runs always, on every backend, regardless of <code class="docutils literal notranslate"><span class="pre">debug</span></code>. A push past the per-stack capacity raises <code class="docutils literal notranslate"><span class="pre">QuadrantsAssertionError(&quot;[Aa]dstack</span> <span class="pre">overflow&quot;)</span></code> at the next Quadrants Python entry that polls the overflow flag after the offending kernel has executed - kernel launch, host-side field / ndarray read, or <code class="docutils literal notranslate"><span class="pre">qd.sync()</span></code>. On CPU this is the entry of the offending launch itself; on GPU it can be one or more entries later, since the GPU may not have run the offending push by the time the poll at end-of-launch fires. The error message describes the cause (untracked tensor mutation between launches, or Quadrants under-estimating the capacity it needed to reserve, which is a bug in Quadrants) and the recovery flow; see <a class="reference internal" href="autodiff.html"><span class="std std-doc">Autodiff -&gt; What can go wrong</span></a> for the full description.</p>
 </section>
 </section>
 <section id="assertions-in-kernels">
@@ -542,6 +542,10 @@
 <p><strong>Note.</strong> Output from GPU kernels appears in order despite parallel execution because all kernels are queued in the same compute stream.</p>
 <p><strong>Important.</strong> Avoid kernel <code class="docutils literal notranslate"><span class="pre">print()</span></code> calls in production code where you can. Quadrants synchronizes the compute queue after every dispatch of a kernel that contains a <code class="docutils literal notranslate"><span class="pre">print()</span></code> so the output appears as close as possible to the call site. The synchronization happens unconditionally on every launch of that kernel, even when the surrounding control flow leaves the <code class="docutils literal notranslate"><span class="pre">print()</span></code> unreached at runtime; the cost is the full per-launch sync overhead, not just the cost of the <code class="docutils literal notranslate"><span class="pre">print()</span></code> itself.</p>
 </section>
+</section>
+<section id="under-the-hood-compiler-and-runtime-internals">
+<h2>Under the hood: compiler and runtime internals<a class="headerlink" href="#under-the-hood-compiler-and-runtime-internals" title="Link to this heading">#</a></h2>
+<p>The tools below expose Quadrants’ own compiler and runtime internals. They are for understanding exactly what Quadrants generated, or for debugging Quadrants itself, rather than for debugging the logic of your own kernels.</p>
 <section id="dumping-compiled-ir">
 <h3>Dumping compiled IR<a class="headerlink" href="#dumping-compiled-ir" title="Link to this heading">#</a></h3>
 <p>To inspect the compiled intermediate representation, use the <code class="docutils literal notranslate"><span class="pre">QD_DUMP_IR</span></code> environment variable:</p>
@@ -632,6 +636,9 @@
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#other-debugging-tools">Other debugging tools</a><ul class="nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#disabling-the-cache">Disabling the cache</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#printing-from-kernels">Printing from kernels</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#under-the-hood-compiler-and-runtime-internals">Under the hood: compiler and runtime internals</a><ul class="nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#dumping-compiled-ir">Dumping compiled IR</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#running-hand-edited-ir-or-ptx">Running hand-edited IR or PTX</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#tracing-adstack-heap-allocations">Tracing adstack heap allocations</a></li>
