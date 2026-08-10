@@ -47,12 +47,13 @@ def is_final_annotation(annotation: Any) -> bool:
     folded into the template spec key and the fastcache key (so distinct values compile distinct kernels), and it is
     NOT declared as a runtime scalar kernel arg.
 
-    Bare ``typing.Final`` (with no ``[T]``) returns False and is treated as an ordinary field - ``typing.get_origin``
-    yields ``None`` for it, and Quadrants needs the wrapped type anyway.
+    Bare ``typing.Final`` (with no ``[T]``) returns False here, because ``typing.get_origin`` yields ``None`` for it.
+    That does NOT make it an ordinary field: ``_build_final_plan`` rejects the bare spelling outright, since Quadrants
+    needs the wrapped type and silently lowering it to a runtime arg dies later in ``cook_dtype``.
 
     ``typing_extensions.Final`` is the same object as ``typing.Final`` on every Python version Quadrants supports
-    (>=3.10), so it is accepted transparently; ``validate_final_fields`` raises a clear error if a future divergence
-    ever makes that untrue.
+    (>=3.10), so it is accepted transparently; ``_build_final_plan`` raises a clear error if a future divergence ever
+    makes that untrue.
     """
     return typing.get_origin(annotation) is typing.Final
 
@@ -75,13 +76,13 @@ def _reject_hint_for(inner: Any) -> str | None:
 
 
 def _validate_final_inner_type(dc_type: type, field_name: str, annotation: Any) -> None:
-    """Raise a clear error unless ``Final[annotation]`` names a type we can bake as a compile-time literal."""
+    """Raise a clear error unless ``Final[annotation]`` names a type we can bake as a compile-time literal.
+
+    Only called once ``is_final_annotation`` has confirmed the annotation is a subscripted ``Final``, so
+    ``typing.get_args`` is guaranteed non-empty here - Python rejects ``Final[()]`` at subscript time, and bare
+    ``Final`` is caught earlier in ``_build_final_plan``.
+    """
     inner = typing.get_args(annotation)
-    if not inner:
-        raise TypeError(
-            f"{dc_type.__name__}.{field_name}: bare ``typing.Final`` is not supported as a Quadrants compile-time "
-            f"template field. Write ``Final[T]`` with a concrete type, e.g. ``{field_name}: Final[int]``."
-        )
     if len(inner) != 1:
         raise TypeError(
             f"{dc_type.__name__}.{field_name}: ``typing.Final`` takes exactly one type argument, got "
@@ -133,6 +134,17 @@ def _build_final_plan(dc_type: type) -> "frozenset[str]":
                     f"{dc_type.__name__}, or annotate with the real type object."
                 )
             continue
+        if annotation is typing.Final:
+            # Bare ``Final`` with no ``[T]``. ``typing.get_origin(typing.Final)`` is ``None``, so this does not look
+            # like a Final annotation to ``is_final_annotation`` and the field would otherwise be treated as an
+            # ordinary runtime one - reaching ``decl_scalar_arg`` and dying in ``cook_dtype`` with
+            # ``ValueError: Invalid data type typing.Final``. That is exactly the confusing failure this feature
+            # exists to remove for ``Final[T]``, so reject the unsupported spelling here with a clear message.
+            raise TypeError(
+                f"{dc_type.__name__}.{field.name}: bare ``typing.Final`` is not supported as a Quadrants "
+                f"compile-time template field. Write ``Final[T]`` with a concrete type, e.g. "
+                f"``{field.name}: Final[int]``."
+            )
         if not is_final_annotation(annotation):
             # Catch a ``Final``-like special form that is not ``typing.Final`` - e.g. if a future ``typing_extensions``
             # release stops aliasing the stdlib object. Silently treating such a field as a runtime one would be a

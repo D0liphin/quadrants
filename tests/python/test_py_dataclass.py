@@ -3616,6 +3616,40 @@ def test_final_field_int_annotation_holding_intenum_value():
 
 
 @test_utils.test()
+def test_bare_final_annotation_is_rejected():
+    """A bare ``Final`` (no ``[T]``) must be rejected up front with a message naming the fix.
+
+    ``typing.get_origin(typing.Final)`` is ``None``, so the bare spelling does not look like a Final annotation and
+    would otherwise be treated as an ordinary runtime field - reaching ``decl_scalar_arg`` and dying in ``cook_dtype``
+    with ``ValueError: Invalid data type typing.Final``. That is precisely the confusing failure this feature removes
+    for ``Final[T]``, so it must not be how the unsupported spelling behaves."""
+    import typing
+
+    from quadrants.lang._dataclass_util import final_field_names, is_final_annotation
+
+    # The bare form genuinely is not a subscripted Final...
+    assert is_final_annotation(typing.Final) is False
+    assert is_final_annotation(typing.Final[int]) is True
+
+    # ...but it is still rejected rather than silently lowered to a runtime arg.
+    @dataclass(frozen=True)
+    class BareFinal:
+        x: typing.Final
+
+    with pytest.raises(TypeError, match="bare ``typing.Final`` is not supported"):
+        final_field_names(BareFinal)
+
+    # And end-to-end, so the user sees that error instead of a cook_dtype failure.
+    @qd.kernel
+    def k(cfg: BareFinal, out: qd.types.NDArray[qd.i32, 1]):
+        for i in out:
+            out[i] = 1
+
+    with pytest.raises(Exception, match="bare ``typing.Final`` is not supported"):
+        k(BareFinal(x=5), qd.ndarray(qd.i32, shape=(2,)))
+
+
+@test_utils.test()
 def test_final_float_field_honors_raise_on_templated_floats():
     """``raise_on_templated_floats`` exists to stop float values from driving kernel specialisation, since each
     distinct value compiles another kernel. A ``Final[float]`` field does exactly that, so it must honour the setting
