@@ -9,6 +9,7 @@
 #include "quadrants/program/kernel.h"
 #include "quadrants/program/program.h"
 #include "quadrants/program/per_construct_cache.h"
+#include "quadrants/codegen/llvm/per_task_artifact_cache.h"
 #include "quadrants/analysis/offline_cache_util.h"
 #include "quadrants/util/lang_util.h"
 #include "quadrants/codegen/ir_dump.h"
@@ -246,9 +247,12 @@ void split_frontend_per_construct(IRNode *ir, const CompileConfig &config, const
     return e != nullptr && std::string(e) == "1";
   }();
   std::unique_ptr<ConstructManifestCache> manifest_store;
+  std::unique_ptr<PerTaskArtifactCache> artifact_store;
   if (manifest_on && kernel->program != nullptr) {
     manifest_store =
         std::make_unique<ConstructManifestCache>(construct_manifest_dir_for(config.offline_cache_file_path));
+    artifact_store =
+        std::make_unique<PerTaskArtifactCache>(pertask_artifact_dir_for(config.offline_cache_file_path));
   }
   ConstructManifestCache *manifests = manifest_store.get();
   const DeviceCapabilityConfig dev_caps =
@@ -333,17 +337,27 @@ void split_frontend_per_construct(IRNode *ir, const CompileConfig &config, const
         // entry-fn / shared-array / adstack-counter names. Reuse is only valid if this construct lands at the same
         // offset, so verify before committing; a shift (an edit changed some earlier construct's task count) is a
         // miss and we just recompile.
+        //
+        // Every named artifact must also still be on disk. Committing to a placeholder is irreversible -- it discards
+        // the construct's IR, so the codegen driver has nothing to fall back on and can only abort. The two tiers are
+        // independent stores and either can lag the other (a pruned or half-written artifact directory, a manifest
+        // recorded for tasks that were served from the in-memory cache and so never persisted), so treat a dangling
+        // reference as an ordinary miss here, while the IR is still available.
         const int base = (int)tasks.size();
-        bool aligned = true;
+        bool usable = true;
         for (int t = 0; t < (int)man.task_keys.size(); t++) {
           const auto &kk = man.task_keys[t];
           const auto pos = kk.rfind('#');
           if (pos == std::string::npos || kk.substr(pos + 1) != std::to_string(base + t)) {
-            aligned = false;
+            usable = false;
+            break;
+          }
+          if (artifact_store != nullptr && !artifact_store->exists(kk)) {
+            usable = false;
             break;
           }
         }
-        if (aligned) {
+        if (usable) {
           for (int t = 0; t < (int)man.task_keys.size(); t++) {
             // Placeholder: an empty serial task purely to hold the slot. It is never lowered -- codegen sees the
             // artifact key recorded for this index and loads the compiled task instead.
