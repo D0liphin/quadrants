@@ -560,19 +560,6 @@
 <li><p><code class="docutils literal notranslate"><span class="pre">QD_DUMP_CFG=1</span></code> - writes the control-flow graph itself. (This also forces the CFG pass back onto the whole-kernel path so the complete graph can be dumped.)</p></li>
 </ul>
 <p>Setting <code class="docutils literal notranslate"><span class="pre">qd.init(print_ir=True)</span></code> prints the IR to the console at pipeline stages instead of writing files.</p>
-<section id="advanced-running-hand-edited-ir-or-ptx">
-<h3>Advanced: running hand-edited IR or PTX<a class="headerlink" href="#advanced-running-hand-edited-ir-or-ptx" title="Link to this heading">#</a></h3>
-<p>Two further environment variables read code <em>back</em> out of <code class="docutils literal notranslate"><span class="pre">debug_dump_path</span></code>, so you can dump a kernel, hand-edit the dumped file, and run your edited version. This is a compiler-debugging workflow rather than an everyday one.</p>
-<ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">QD_LOAD_IR=1</span></code> - reparses <code class="docutils literal notranslate"><span class="pre">&lt;debug_dump_path&gt;/&lt;task&gt;_llvm.ll</span></code> and uses it instead of the code the compiler just generated. This applies only to the backends that generate code through the LLVM compiler toolchain, namely CPU, CUDA and AMDGPU; the Vulkan and Metal backends never read it. The value is parsed as an integer, so <code class="docutils literal notranslate"><span class="pre">QD_LOAD_IR=0</span></code> leaves it off.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">QUADRANTS_LOAD_PTX=1</span></code> - reads <code class="docutils literal notranslate"><span class="pre">&lt;debug_dump_path&gt;/&lt;name&gt;.ptx</span></code> and uses it as the kernel’s PTX, the intermediate assembly format that the NVIDIA driver turns into machine code. CUDA only. This one is enabled by being set to <em>any</em> value, including <code class="docutils literal notranslate"><span class="pre">0</span></code>, so unset it rather than setting it to <code class="docutils literal notranslate"><span class="pre">0</span></code> to turn it off.</p></li>
-</ul>
-<p>Both replacements happen while a kernel is being compiled, and a cached kernel is returned without compiling anything, so you have to switch off both the <a class="reference internal" href="init_options.html#offline-cache"><span class="std std-ref">offline cache</span></a> and <a class="reference internal" href="fastcache.html"><span class="std std-doc">fastcache</span></a>, whose <code class="docutils literal notranslate"><span class="pre">qd.init</span></code> parameter is <code class="docutils literal notranslate"><span class="pre">src_ll_cache</span></code>, or your edited file will simply not be read:</p>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">qd</span><span class="o">.</span><span class="n">init</span><span class="p">(</span><span class="n">arch</span><span class="o">=</span><span class="n">qd</span><span class="o">.</span><span class="n">cuda</span><span class="p">,</span> <span class="n">offline_cache</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">src_ll_cache</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
-</pre></div>
-</div>
-<p><code class="docutils literal notranslate"><span class="pre">qd.init</span></code> raises a <code class="docutils literal notranslate"><span class="pre">ValueError</span></code> if you set either variable on a backend that reads it while either cache is still enabled, rather than letting the run silently execute the unedited kernel.</p>
-</section>
 </section>
 <section id="under-the-hood-per-task-scoping">
 <h2>Under the hood: per-task scoping<a class="headerlink" href="#under-the-hood-per-task-scoping" title="Link to this heading">#</a></h2>
@@ -632,10 +619,7 @@
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#the-simplify-loop">The simplify loop</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#control-flow-graph-cfg-optimization">Control-flow-graph (CFG) optimization</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#controlling-the-passes">Controlling the passes</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#inspecting-what-the-compiler-did">Inspecting what the compiler did</a><ul class="nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#advanced-running-hand-edited-ir-or-ptx">Advanced: running hand-edited IR or PTX</a></li>
-</ul>
-</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#inspecting-what-the-compiler-did">Inspecting what the compiler did</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#under-the-hood-per-task-scoping">Under the hood: per-task scoping</a></li>
 </ul>
   </nav></div>

@@ -120,6 +120,21 @@ QD_DUMP_IR=1 QD_OFFLINE_CACHE=0 python my_script.py
 
 Compiled kernels will be written to `/tmp/ir` by default. Use `QD_DEBUG_DUMP_PATH=` to redirect to a custom directory.
 
+### Running hand-edited IR or PTX
+
+A dump can be edited and fed back in, which is a quick way to try an instruction sequence by hand before changing the compiler. `QD_LOAD_IR=1` makes the CPU, CUDA and AMDGPU backends read LLVM IR (the representation they compile through) back from the dump directory instead of generating it; `QUADRANTS_LOAD_PTX=1` does the same for PTX (the assembly the NVIDIA driver consumes) on CUDA. Both caches have to be off in the script under test:
+
+```python
+qd.init(arch=qd.cuda, offline_cache=False, src_ll_cache=False)
+```
+
+```bash
+QD_DUMP_IR=1 QD_DEBUG_DUMP_PATH=/tmp/ir python my_script.py  # dump, then edit the files under /tmp/ir
+QD_LOAD_IR=1 QD_DEBUG_DUMP_PATH=/tmp/ir python my_script.py  # run what you edited
+```
+
+**Important.** The replacement files are only read while a kernel is being compiled, and a cached kernel is handed back without compiling, so with either cache left on, an already-cached kernel keeps running its old code and nothing says so. `qd.init` raises a `ValueError` instead of letting that happen. Unlike `offline_cache`, [`src_ll_cache`](./fastcache.md) has no environment variable, so it has to be passed to `qd.init`.
+
 ### Tracing adstack heap allocations
 
 ```bash
