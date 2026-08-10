@@ -178,7 +178,7 @@ This is the recommended pattern for **static configuration objects** - bags of f
 Semantics of a `Final[T]` field:
 
 - **Baked into the kernel.** `config.field` inside a kernel body (or inside a `@qd.func` called from one) resolves at compile time to the field's actual Python value.
-- **Each distinct value compiles a separate kernel.** Quadrants decides which compiled kernel to reuse by looking at the field's value, both within the running process and in the on-disk [fastcache](fastcache.md). Changing the value therefore triggers a recompile, and a kernel built for one value is never reused for another. Two instances carrying equal values share one compiled kernel.
+- **Each distinct value compiles a separate kernel.** Quadrants decides which compiled kernel to reuse by looking at the field's value.
 - **Not a kernel argument.** A `Final` field occupies no kernel argument slot and costs nothing at launch.
 - **Mixing is fine.** Final and ordinary fields coexist in the same dataclass, at any nesting depth.
 
