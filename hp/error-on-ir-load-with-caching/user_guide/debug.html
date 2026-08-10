@@ -462,8 +462,7 @@
 </div>
 <section id="adstack-overflow">
 <h4>Adstack overflow<a class="headerlink" href="#adstack-overflow" title="Link to this heading">#</a></h4>
-<p>The adstack is the per-thread stack that reverse-mode autodiff uses to save the intermediate values a kernel produces, so that the backward pass can read them back. Overflowing it is checked always, on every backend, regardless of <code class="docutils literal notranslate"><span class="pre">debug</span></code>, and raises <code class="docutils literal notranslate"><span class="pre">QuadrantsAssertionError(&quot;[Aa]dstack</span> <span class="pre">overflow&quot;)</span></code>.</p>
-<p>The error surfaces at the first Quadrants call after the kernel that overflowed: a kernel launch, a host-side field / ndarray read, or <code class="docutils literal notranslate"><span class="pre">qd.sync()</span></code>. On CPU that is the offending launch itself, but on GPU it can be one or more calls later, so the traceback may point at innocent code and the kernel to look at is one launched earlier. The message names the likely cause, either an untracked tensor mutation between launches or Quadrants under-estimating the capacity it needed to reserve, which is a bug in Quadrants, along with the recovery flow; see <a class="reference internal" href="autodiff.html"><span class="std std-doc">Autodiff -&gt; What can go wrong</span></a> for the full description.</p>
+<p>The adstack overflow check on reverse-mode autodiff runs always, on every backend, regardless of <code class="docutils literal notranslate"><span class="pre">debug</span></code>. A push past the per-stack capacity raises <code class="docutils literal notranslate"><span class="pre">QuadrantsAssertionError(&quot;[Aa]dstack</span> <span class="pre">overflow&quot;)</span></code> at the next Quadrants Python entry that polls the overflow flag after the offending kernel has executed - kernel launch, host-side field / ndarray read, or <code class="docutils literal notranslate"><span class="pre">qd.sync()</span></code>. On CPU this is the entry of the offending launch itself; on GPU it can be one or more entries later, since the GPU may not have run the offending push by the time the poll at end-of-launch fires. The error message describes the cause (untracked tensor mutation between launches, or sizer under-estimate caused by a bug in Quadrants) and the recovery flow; see <a class="reference internal" href="autodiff.html"><span class="std std-doc">Autodiff -&gt; What can go wrong</span></a> for the full description.</p>
 </section>
 </section>
 <section id="assertions-in-kernels">
@@ -543,10 +542,6 @@
 <p><strong>Note.</strong> Output from GPU kernels appears in order despite parallel execution because all kernels are queued in the same compute stream.</p>
 <p><strong>Important.</strong> Avoid kernel <code class="docutils literal notranslate"><span class="pre">print()</span></code> calls in production code where you can. Quadrants synchronizes the compute queue after every dispatch of a kernel that contains a <code class="docutils literal notranslate"><span class="pre">print()</span></code> so the output appears as close as possible to the call site. The synchronization happens unconditionally on every launch of that kernel, even when the surrounding control flow leaves the <code class="docutils literal notranslate"><span class="pre">print()</span></code> unreached at runtime; the cost is the full per-launch sync overhead, not just the cost of the <code class="docutils literal notranslate"><span class="pre">print()</span></code> itself.</p>
 </section>
-</section>
-<section id="under-the-hood-compiler-and-runtime-internals">
-<h2>Under the hood: compiler and runtime internals<a class="headerlink" href="#under-the-hood-compiler-and-runtime-internals" title="Link to this heading">#</a></h2>
-<p>The tools below expose Quadrants’ own compiler and runtime internals. They are for understanding exactly what Quadrants generated, or for debugging Quadrants itself, rather than for debugging the logic of your own kernels.</p>
 <section id="dumping-compiled-ir">
 <h3>Dumping compiled IR<a class="headerlink" href="#dumping-compiled-ir" title="Link to this heading">#</a></h3>
 <p>To inspect the compiled intermediate representation, use the <code class="docutils literal notranslate"><span class="pre">QD_DUMP_IR</span></code> environment variable:</p>
@@ -554,18 +549,6 @@
 </pre></div>
 </div>
 <p>Compiled kernels will be written to <code class="docutils literal notranslate"><span class="pre">/tmp/ir</span></code> by default. Use <code class="docutils literal notranslate"><span class="pre">QD_DEBUG_DUMP_PATH=</span></code> to redirect to a custom directory.</p>
-</section>
-<section id="running-hand-edited-ir-or-ptx">
-<h3>Running hand-edited IR or PTX<a class="headerlink" href="#running-hand-edited-ir-or-ptx" title="Link to this heading">#</a></h3>
-<p>A dump can be edited and fed back in, which is a quick way to try an instruction sequence by hand before changing the compiler. <code class="docutils literal notranslate"><span class="pre">QD_LOAD_IR=1</span></code> makes the CPU, CUDA and AMDGPU backends read LLVM IR (the representation they compile through) back from the dump directory instead of generating it; <code class="docutils literal notranslate"><span class="pre">QUADRANTS_LOAD_PTX=1</span></code> does the same for PTX (the assembly the NVIDIA driver consumes) on CUDA. Both caches have to be off in the script under test:</p>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">qd</span><span class="o">.</span><span class="n">init</span><span class="p">(</span><span class="n">arch</span><span class="o">=</span><span class="n">qd</span><span class="o">.</span><span class="n">cuda</span><span class="p">,</span> <span class="n">offline_cache</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">src_ll_cache</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
-</pre></div>
-</div>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">QD_DUMP_IR</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="nv">QD_DEBUG_DUMP_PATH</span><span class="o">=</span>/tmp/ir<span class="w"> </span>python<span class="w"> </span>my_script.py<span class="w">  </span><span class="c1"># dump, then edit the files under /tmp/ir</span>
-<span class="nv">QD_LOAD_IR</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="nv">QD_DEBUG_DUMP_PATH</span><span class="o">=</span>/tmp/ir<span class="w"> </span>python<span class="w"> </span>my_script.py<span class="w">  </span><span class="c1"># run what you edited</span>
-</pre></div>
-</div>
-<p><strong>Important.</strong> The replacement files are only read while a kernel is being compiled, and a cached kernel is handed back without compiling, so with either cache left on, an already-cached kernel keeps running its old code and nothing says so. <code class="docutils literal notranslate"><span class="pre">qd.init</span></code> raises a <code class="docutils literal notranslate"><span class="pre">ValueError</span></code> instead of letting that happen. Unlike <code class="docutils literal notranslate"><span class="pre">offline_cache</span></code>, <a class="reference internal" href="fastcache.html"><span class="std std-doc"><code class="docutils literal notranslate"><span class="pre">src_ll_cache</span></code></span></a> has no environment variable, so it has to be passed to <code class="docutils literal notranslate"><span class="pre">qd.init</span></code>.</p>
 </section>
 <section id="tracing-adstack-heap-allocations">
 <h3>Tracing adstack heap allocations<a class="headerlink" href="#tracing-adstack-heap-allocations" title="Link to this heading">#</a></h3>
@@ -637,11 +620,7 @@
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#other-debugging-tools">Other debugging tools</a><ul class="nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#disabling-the-cache">Disabling the cache</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#printing-from-kernels">Printing from kernels</a></li>
-</ul>
-</li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#under-the-hood-compiler-and-runtime-internals">Under the hood: compiler and runtime internals</a><ul class="nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#dumping-compiled-ir">Dumping compiled IR</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#running-hand-edited-ir-or-ptx">Running hand-edited IR or PTX</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#tracing-adstack-heap-allocations">Tracing adstack heap allocations</a></li>
 </ul>
 </li>
