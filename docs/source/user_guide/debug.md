@@ -38,7 +38,9 @@ a = x[-1]     # AssertionError in debug mode
 
 #### Adstack overflow
 
-The adstack is the per-thread stack that reverse-mode autodiff uses to save the intermediate values a kernel produces, so that the backward pass can read them back. Its overflow check runs always, on every backend, regardless of `debug`. A push past the per-stack capacity raises `QuadrantsAssertionError("[Aa]dstack overflow")` at the next Quadrants Python entry that polls the overflow flag after the offending kernel has executed - kernel launch, host-side field / ndarray read, or `qd.sync()`. On CPU this is the entry of the offending launch itself; on GPU it can be one or more entries later, since the GPU may not have run the offending push by the time the poll at end-of-launch fires. The error message describes the cause (untracked tensor mutation between launches, or Quadrants under-estimating the capacity it needed to reserve, which is a bug in Quadrants) and the recovery flow; see [Autodiff -> What can go wrong](autodiff.md) for the full description.
+The adstack is the per-thread stack that reverse-mode autodiff uses to save the intermediate values a kernel produces, so that the backward pass can read them back. Overflowing it is checked always, on every backend, regardless of `debug`, and raises `QuadrantsAssertionError("[Aa]dstack overflow")`.
+
+The error surfaces at the first Quadrants call after the kernel that overflowed: a kernel launch, a host-side field / ndarray read, or `qd.sync()`. On CPU that is the offending launch itself, but on GPU it can be one or more calls later, so the traceback may point at innocent code and the kernel to look at is one launched earlier. The message names the likely cause, either an untracked tensor mutation between launches or Quadrants under-estimating the capacity it needed to reserve, which is a bug in Quadrants, along with the recovery flow; see [Autodiff -> What can go wrong](autodiff.md) for the full description.
 
 ### Assertions in kernels
 
