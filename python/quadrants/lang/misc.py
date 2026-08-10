@@ -329,15 +329,11 @@ def _install_python_backend_dtype_call():
 
 
 def _check_ir_load_envs_against_caching(cfg, src_ll_cache: bool) -> None:
-    """Reject QD_LOAD_IR / QUADRANTS_LOAD_PTX when a cache could stop codegen from ever reading the files.
+    """Reject QD_LOAD_IR / QUADRANTS_LOAD_PTX when caching could stop codegen from ever reading the files.
 
-    Both variables make codegen discard the module it just built and use IR / PTX read back from ``debug_dump_path``
-    instead. Codegen only runs on a cache miss, since ``KernelCompilationManager::load_or_compile`` returns the cached
-    artifact otherwise, so with caching enabled an already-cached kernel is handed back untouched and the edited file is
-    never read. The kernel still runs, it just is not the code that was edited, and nothing says so.
-
-    Must be called after arch selection: each variable is only read by some backends, and ``adaptive_arch_select`` may
-    have fallen back to an arch other than the one requested.
+    A cached kernel skips codegen, so edited IR / PTX in ``debug_dump_path`` is silently ignored. Call after arch
+    selection: each variable is read by only some backends, and ``adaptive_arch_select`` may not have picked the
+    requested arch.
     """
     active = []
     # codegen_llvm.cpp reads QD_LOAD_IR via get_environ_config, which parses the value as an int, so "0" leaves it off.
