@@ -7,7 +7,13 @@
 
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <vector>
+#include <algorithm>
+#include <typeinfo>
+#include <cstdint>
+#include <string>
 
 namespace quadrants::lang {
 
@@ -454,10 +460,55 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
       return;
     if ((config_.arch == Arch::vulkan || config_.arch == Arch::metal) && demotable_axis_load(stmt))
       return;
-    // Not yet allocated
-    if (local_to_global_.find(top_level_ptr) == local_to_global_.end()) {
-      local_to_global_[top_level_ptr] = allocate_global(top_level_ptr->ret_type);
+    // Collect (dedup, in traversal order) the cross-offload value. Offset assignment is deferred to assign_offsets()
+    // so it can be done in a stable content-keyed order (S2a') rather than traversal order.
+    if (!value_seen_.count(top_level_ptr)) {
+      value_seen_.insert(top_level_ptr);
+      ordered_values_.push_back(top_level_ptr);
     }
+  }
+
+  // Recursive, offset-free content hash over the value's operand-def DAG: a value's key depends on WHAT it is
+  // (statement kind, type, constant/arg identity, operand structure), not on offload traversal order. Memoized (also
+  // dedups shared subexpressions). Used to order global-temp slot assignment stably (S2a').
+  std::uint64_t stable_key(Stmt *s) {
+    if (s == nullptr)
+      return 0;
+    auto it = key_memo_.find(s);
+    if (it != key_memo_.end())
+      return it->second;
+    key_memo_[s] = 1;  // cycle guard; SSA def DAG is acyclic so this is only defensive
+    auto hstr = [](const std::string &str) {
+      std::uint64_t h = 1469598103934665603ULL;
+      for (unsigned char c : str)
+        h = (h ^ c) * 1099511628211ULL;
+      return h;
+    };
+    auto mix = [](std::uint64_t h, std::uint64_t x) { return (h ^ x) * 1099511628211ULL; };
+    std::uint64_t h = hstr(typeid(*s).name());
+    h = mix(h, hstr(s->ret_type.to_string()));
+    if (auto *c = s->cast<ConstStmt>())
+      h = mix(h, hstr(c->val.stringify()));
+    if (auto *a = s->cast<ArgLoadStmt>()) {
+      for (int id : a->arg_id)
+        h = mix(h, (std::uint64_t)(unsigned)id);
+      h = mix(h, (std::uint64_t)a->is_ptr);
+    }
+    for (auto *op : s->get_operands())
+      h = mix(h, stable_key(op));
+    key_memo_[s] = h;
+    return h;
+  }
+
+  // Assign a global-temp offset to every collected cross-offload value, reusing allocate_global's sizing/alignment
+  // verbatim. Values are ordered by stable_key first (stable_sort keeps traversal order among equal keys), so a
+  // slot's offset is a function of its content rather than of traversal order -- which is what keeps a task's IR,
+  // and therefore its cache key, stable across edits elsewhere in the kernel.
+  void assign_offsets() {
+    std::stable_sort(ordered_values_.begin(), ordered_values_.end(),
+                     [this](Stmt *a, Stmt *b) { return stable_key(a) < stable_key(b); });
+    for (auto *v : ordered_values_)
+      local_to_global_[v] = allocate_global(v->ret_type);
   }
 
   void generic_visit(Stmt *stmt) {
@@ -482,6 +533,7 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
                              OffloadedRanges *offloaded_ranges) {
     IdentifyValuesUsedInOtherOffloads pass(config, stmt_to_offloaded, offloaded_ranges);
     root->accept(&pass);
+    pass.assign_offsets();
     return pass.local_to_global_;
   }
 
@@ -493,6 +545,10 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
   StmtToOffsetMap local_to_global_;
   Stmt *current_offloaded_;
   std::size_t global_offset_;
+  // Cross-offload values in first-encounter (traversal) order, offset assignment deferred to assign_offsets().
+  std::vector<Stmt *> ordered_values_;
+  std::unordered_set<Stmt *> value_seen_;
+  std::unordered_map<Stmt *, std::uint64_t> key_memo_;
 };
 
 // Store intermediate values to globals so that statements in later offloaded
