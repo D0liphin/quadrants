@@ -135,8 +135,6 @@ QD_LOAD_IR=1 QD_DEBUG_DUMP_PATH=/tmp/ir python my_script.py  # run what you edit
 
 **Important.** The replacement files are only read while a kernel is being compiled, and a cached kernel is handed back without compiling, so with either cache left on, an already-cached kernel keeps running its old code and nothing says so. `qd.init` raises a `ValueError` instead of letting that happen. Unlike `offline_cache`, [`src_ll_cache`](./fastcache.md) has no environment variable, so it has to be passed to `qd.init`.
 
-**Note.** `QUADRANTS_LOAD_PTX` is enabled by being present at all, so `QUADRANTS_LOAD_PTX=0` still enables it - unset it instead. `QD_LOAD_IR` parses its value, so `QD_LOAD_IR=0` leaves it off.
-
 ### Tracing adstack heap allocations
 
 ```bash

@@ -91,9 +91,14 @@ def test_error_load_ir_on_llvm_gpu_arch(arch):
             misc._check_ir_load_envs_against_caching(FakeCfg(arch), src_ll_cache=True)
 
 
-def test_load_ptx_gating_is_presence_only():
-    # jit_cuda only checks that QUADRANTS_LOAD_PTX is present, so even "0" enables the load path.
+def test_no_error_when_load_ptx_is_zero():
+    # QUADRANTS_LOAD_PTX goes through get_environ_config on the C++ side too, so "0" is off, as for QD_LOAD_IR.
     with env_vars(QD_LOAD_IR=None, QUADRANTS_LOAD_PTX="0"):
+        misc._check_ir_load_envs_against_caching(FakeCfg(qd.cuda), src_ll_cache=True)
+
+
+def test_error_load_ptx_on_cuda():
+    with env_vars(QD_LOAD_IR=None, QUADRANTS_LOAD_PTX="1"):
         with pytest.raises(ValueError, match="QUADRANTS_LOAD_PTX"):
             misc._check_ir_load_envs_against_caching(FakeCfg(qd.cuda), src_ll_cache=False)
 

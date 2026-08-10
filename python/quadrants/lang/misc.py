@@ -344,8 +344,8 @@ def _check_ir_load_envs_against_caching(cfg, src_ll_cache: bool) -> None:
     # It lives in the LLVM codegen, so the SPIR-V backends (Vulkan, Metal) never read it.
     if os.getenv("QD_LOAD_IR", "0") not in ("", "0") and _qd_core.arch_uses_llvm(cfg.arch):
         active.append("QD_LOAD_IR")
-    # jit_cuda.cpp only checks that QUADRANTS_LOAD_PTX is present, so any value at all enables it, but only on CUDA.
-    if os.getenv("QUADRANTS_LOAD_PTX") is not None and cfg.arch == _qd_core.cuda:
+    # jit_cuda.cpp reads QUADRANTS_LOAD_PTX the same way, but it lives in the CUDA JIT, so only CUDA reads it.
+    if os.getenv("QUADRANTS_LOAD_PTX", "0") not in ("", "0") and cfg.arch == _qd_core.cuda:
         active.append("QUADRANTS_LOAD_PTX")
     if not active or not (cfg.offline_cache or src_ll_cache):
         return
