@@ -462,8 +462,7 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
     if ((config_.arch == Arch::vulkan || config_.arch == Arch::metal) && demotable_axis_load(stmt))
       return;
     // Collect (dedup, in traversal order) the cross-offload value. Offset assignment is deferred to assign_offsets()
-    // so it can optionally be done in a stable content-keyed order (S2a', QD_STABLE_GTMP=1) rather than traversal
-    // order; the default (flag off) assigns in this same traversal order, byte-identical to the original bump policy.
+    // so it can be done in a stable content-keyed order (S2a') rather than traversal order.
     if (!value_seen_.count(top_level_ptr)) {
       value_seen_.insert(top_level_ptr);
       ordered_values_.push_back(top_level_ptr);
@@ -503,17 +502,12 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
   }
 
   // Assign a global-temp offset to every collected cross-offload value, reusing allocate_global's sizing/alignment
-  // verbatim. Under QD_STABLE_GTMP=1 the values are ordered by stable_key first (stable_sort keeps traversal order
-  // among equal keys), so a slot's offset is a function of its content; otherwise traversal order (original policy).
+  // verbatim. Values are ordered by stable_key first (stable_sort keeps traversal order among equal keys), so a
+  // slot's offset is a function of its content rather than of traversal order -- which is what keeps a task's IR,
+  // and therefore its cache key, stable across edits elsewhere in the kernel.
   void assign_offsets() {
-    static const bool stable = []() {
-      const char *e = std::getenv("QD_STABLE_GTMP");
-      return e != nullptr && std::string(e) == "1";
-    }();
-    if (stable) {
-      std::stable_sort(ordered_values_.begin(), ordered_values_.end(),
-                       [this](Stmt *a, Stmt *b) { return stable_key(a) < stable_key(b); });
-    }
+    std::stable_sort(ordered_values_.begin(), ordered_values_.end(),
+                     [this](Stmt *a, Stmt *b) { return stable_key(a) < stable_key(b); });
     for (auto *v : ordered_values_)
       local_to_global_[v] = allocate_global(v->ret_type);
   }

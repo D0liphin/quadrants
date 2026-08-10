@@ -169,8 +169,7 @@ bool stmt_is_task_effect(Stmt *s) {
   return s->has_global_side_effect();
 }
 
-// S2 step A driver (env QD_SPLIT_FRONTEND=1): split the flat top-level block into constructs right after lower_ast +
-// the structural prefix, run the full per-construct frontend on each (with recompute of shared top-level defs,
+// S2 step A driver: split the flat top-level block into constructs right after lower_ast + the structural prefix, run the full per-construct frontend on each (with recompute of shared top-level defs,
 // catch-2), and reassemble the produced OffloadedStmts in source order. This is the correctness backbone for the
 // per-construct frontend cache (§9): each construct compiles independently so its simplify/mgp buckets are tiny (S0b)
 // and its output can later be keyed + cached + skipped (§9.B/C). Correctness for recompute-safe kernels rests on S2b:
@@ -231,24 +230,13 @@ void split_frontend_per_construct(IRNode *ir, const CompileConfig &config, const
 
   // S2 step C (§9.C): program-scoped per-construct FRONTEND cache. On a warm compile only the changed construct's
   // frontend re-runs; unchanged constructs are cloned out of the cache, skipping simplify/mgp/offload. Content-keyed,
-  // so identical constructs across kernels (same ABI/config) share entries. Default on whenever the split runs;
-  // QD_CONSTRUCT_CACHE=0 disables it for A/B equivalence checks.
-  static const bool construct_cache_on = []() {
-    const char *e = std::getenv("QD_CONSTRUCT_CACHE");
-    return e == nullptr || std::string(e) != "0";
-  }();
-  PerConstructCache *cc =
-      (construct_cache_on && kernel->program != nullptr) ? &kernel->program->per_construct_cache() : nullptr;
+  // so identical constructs across kernels (same ABI/config) share entries.
+  PerConstructCache *cc = (kernel->program != nullptr) ? &kernel->program->per_construct_cache() : nullptr;
 
-  // §9.D Part A2 cross-process construct manifests. Enabled with QD_CONSTRUCT_MANIFEST=1 (and only meaningful
-  // alongside the per-task artifact cache, which holds the compiled tasks the manifests name).
-  static const bool manifest_on = []() {
-    const char *e = std::getenv("QD_CONSTRUCT_MANIFEST");
-    return e != nullptr && std::string(e) == "1";
-  }();
+  // §9.D Part A2 cross-process construct manifests, naming the compiled tasks held by the per-task artifact cache.
   std::unique_ptr<ConstructManifestCache> manifest_store;
   std::unique_ptr<PerTaskArtifactCache> artifact_store;
-  if (manifest_on && kernel->program != nullptr) {
+  if (kernel->program != nullptr) {
     manifest_store =
         std::make_unique<ConstructManifestCache>(construct_manifest_dir_for(config.offline_cache_file_path));
     artifact_store =
@@ -487,11 +475,6 @@ void compile_to_offloads(IRNode *ir,
     irpass::lower_ast(ir);
   }
 
-  static const bool split_frontend = []() {
-    const char *e = std::getenv("QD_SPLIT_FRONTEND");
-    return e != nullptr && std::string(e) == "1";
-  }();
-
   dump_ir("quadrants1");
   irpass::compile_quadrants_functions(ir, config, Function::IRStage::BeforeLowerAccess);
   irpass::analysis::gather_func_store_dests(ir);
@@ -521,12 +504,12 @@ void compile_to_offloads(IRNode *ir,
 
   dump_ir("before_simplify_I");
 
-  // S2 step A (design §9.A, env QD_SPLIT_FRONTEND=1): for recompute-safe kernels (forward-only, non-mesh), run the
-  // remaining pre-offload + offload frontend PER top-level construct and reassemble, instead of once over the whole
-  // kernel. The seam is here — right after lower_ast + the structural prefix (function inlining, matrix-ptr lowering,
-  // bit-loop vectorize), before the expensive simplify/merge_global_ptrs/offload passes (§7.3). Anything not
-  // recompute-safe (autodiff, mesh-for) falls through to the whole-kernel path below.
-  if (split_frontend && autodiff_mode == AutodiffMode::kNone && !block_has_mesh_for(ir->cast<Block>()) &&
+  // S2 step A (design §9.A): for recompute-safe kernels (forward-only, non-mesh), run the remaining pre-offload +
+  // offload frontend PER top-level construct and reassemble, instead of once over the whole kernel. The seam is here
+  // — right after lower_ast + the structural prefix (function inlining, matrix-ptr lowering, bit-loop vectorize),
+  // before the expensive simplify/merge_global_ptrs/offload passes (§7.3). Anything not recompute-safe (autodiff,
+  // mesh-for) falls through to the whole-kernel path below.
+  if (autodiff_mode == AutodiffMode::kNone && !block_has_mesh_for(ir->cast<Block>()) &&
       split_is_recompute_safe(ir->cast<Block>())) {
     split_frontend_per_construct(ir, config, kernel, verbose);
     dump_ir("after_offload");

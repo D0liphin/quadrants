@@ -307,12 +307,10 @@ JITModule *JITSessionCUDA::add_module_culink(std::vector<PerConstructArtifact> a
   constexpr uint32 kCuJitErrorLogBufferSizeBytes = 6;
   auto &drv = CUDADriver::get_instance();
 
-  // QD_CULINK_CUBIN=1: emit a cached relocatable cubin per construct (ptxas -c) and feed CU_JIT_INPUT_CUBIN so an
-  // unchanged construct skips PTX + ptxas (slice 1b). Default (unset): feed PTX inputs (slice 1a; driver ptxas each).
-  static const bool use_cubin = []() {
-    const char *e = std::getenv("QD_CULINK_CUBIN");
-    return e != nullptr && std::string(e) == "1";
-  }();
+  // Emit a cached relocatable cubin per construct (ptxas -c) and feed CU_JIT_INPUT_CUBIN, so an unchanged construct
+  // skips PTX + ptxas entirely. The alternative (feeding PTX inputs and letting the driver ptxas each one) is kept
+  // below only as the fallback for artifacts that arrive without a cubin.
+  constexpr bool use_cubin = true;
 
   std::vector<std::string> ptxs;          // slice 1a path
   std::vector<std::vector<char>> cubins;  // slice 1b path

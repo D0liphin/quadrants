@@ -11,8 +11,6 @@ what we exercise here. (A byte-identical kernel would instead hit the whole-kern
 per-task codegen, so it is not a useful probe of this layer.)
 """
 
-import pytest
-
 import quadrants as qd
 
 from tests import test_utils
@@ -74,10 +72,8 @@ def test_per_offload_cache_one_construct_edit() -> None:
 def test_per_construct_frontend_cache_one_construct_edit() -> None:
     """Per-construct FRONTEND cache (S2 / §9.C).
 
-    Only meaningful when the per-construct frontend split is enabled (QD_SPLIT_FRONTEND=1). The gate is a
-    process-static, so this self-skips in a normal (split-off) run and asserts the construct-cache behavior when the
-    suite is run with the split on. Editing one construct recomputes exactly its frontend; the other three constructs
-    are cloned out of the program-scoped construct cache.
+    Editing one construct recomputes exactly its frontend; the other three constructs are cloned out of the
+    program-scoped construct cache.
     """
 
     @qd.kernel
@@ -106,8 +102,6 @@ def test_per_construct_frontend_cache_one_construct_edit() -> None:
 
     kernel_a(arr)
     obs_a = kernel_a._primal.per_offload_cache_observations
-    if obs_a.frontend_constructs_total < 0:
-        pytest.skip("per-construct frontend split not enabled (QD_SPLIT_FRONTEND unset)")
 
     # Cold: empty construct cache, so all four constructs recompile their frontend.
     assert obs_a.frontend_constructs_total == 4, obs_a

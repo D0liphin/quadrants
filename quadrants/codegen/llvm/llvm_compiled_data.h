@@ -222,8 +222,8 @@ struct PerConstructArtifact {
 struct LLVMCompiledKernel {
   std::vector<OffloadedTask> tasks;
   std::unique_ptr<llvm::Module> module{nullptr};
-  // Per-task self-contained artifacts for the relocatable-cubin + cuLink relink path (§9.D). Populated only under
-  // QD_CULINK_PERTASK; empty => the JIT uses the whole-module `module`. Transient (not part of QD_IO_DEF): the
+  // Per-task self-contained artifacts for the relocatable-cubin + cuLink relink path (§9.D). Empty => the JIT uses
+  // the whole-module `module`. Transient (not part of QD_IO_DEF): the
   // cross-process persistence for these lives in the `PerTaskArtifactCache` on disk, keyed by each entry's `key`,
   // not in the whole-kernel `.qdc` blob.
   std::vector<PerConstructArtifact> per_construct_artifacts;

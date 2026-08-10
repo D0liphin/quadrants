@@ -85,17 +85,10 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
   // §9.D Part B: cross-process per-task artifact cache. On a hit we skip this task's ENTIRE compilation -- CHI->LLVM
   // codegen, link, optimize, PTX and ptxas -- and carry the cached cubin straight to the cuLink assembly, using the
   // record's `OffloadedTask` metadata for launch/graph construction. Only meaningful on the per-task cuLink path
-  // (there is no whole-module LLVM module to build if some tasks are code-only), hence the QD_CULINK_PERTASK
-  // requirement. Gated for now so it can be A/B'd against the in-memory-only path.
-  static const bool artifact_cache_on = []() {
-    const char *e = std::getenv("QD_PERTASK_ARTIFACT_CACHE");
-    return e != nullptr && std::string(e) == "1";
-  }();
-  static const bool culink_pertask = []() {
-    const char *e = std::getenv("QD_CULINK_PERTASK");
-    return e != nullptr && std::string(e) == "1";
-  }();
-  const bool use_artifact_cache = artifact_cache_on && culink_pertask;
+  // (there is no whole-module LLVM module to build if some tasks are code-only), hence the per-task cuLink
+  // requirement.
+  constexpr bool culink_pertask = true;
+  const bool use_artifact_cache = culink_pertask;
   const PerTaskArtifactCache artifact_cache(pertask_artifact_dir_for(compile_config_.offline_cache_file_path));
   std::vector<std::vector<char>> artifact_cubins(offloads.size());
 
@@ -239,7 +232,7 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
     }
   }
 
-  // Per-task cuLink path (QD_CULINK_PERTASK=1, §9.D): produce one artifact per offloaded task -- either a
+  // Per-task cuLink path (§9.D): produce one artifact per offloaded task -- either a
   // self-contained module (link its runtime deps + optimize) built here BEFORE the whole-module link consumes
   // `data`, or a cubin already loaded from the cross-process artifact cache above. These flow to the CUDA JIT, which
   // compiles the former, persists complete records, and `cuLink`s everything into one CUmodule.
