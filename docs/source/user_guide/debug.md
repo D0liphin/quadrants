@@ -38,9 +38,7 @@ a = x[-1]     # AssertionError in debug mode
 
 #### Adstack overflow
 
-The adstack is the per-thread stack that reverse-mode autodiff uses to save the intermediate values a kernel produces, so that the backward pass can read them back. Overflowing it is checked always, on every backend, regardless of `debug`, and raises `QuadrantsAssertionError("[Aa]dstack overflow")`.
-
-The error surfaces at the first Quadrants call after the kernel that overflowed: a kernel launch, a host-side field / ndarray read, or `qd.sync()`. On CPU that is the offending launch itself, but on GPU it can be one or more calls later, so the traceback may point at innocent code and the kernel to look at is one launched earlier. The message names the likely cause, either an untracked tensor mutation between launches or Quadrants under-estimating the capacity it needed to reserve, which is a bug in Quadrants, along with the recovery flow; see [Autodiff -> What can go wrong](autodiff.md) for the full description.
+The adstack overflow check on reverse-mode autodiff runs always, on every backend, regardless of `debug`. A push past the per-stack capacity raises `QuadrantsAssertionError("[Aa]dstack overflow")` at the next Quadrants Python entry that polls the overflow flag after the offending kernel has executed - kernel launch, host-side field / ndarray read, or `qd.sync()`. On CPU this is the entry of the offending launch itself; on GPU it can be one or more entries later, since the GPU may not have run the offending push by the time the poll at end-of-launch fires. The error message describes the cause (untracked tensor mutation between launches, or sizer under-estimate caused by a bug in Quadrants) and the recovery flow; see [Autodiff -> What can go wrong](autodiff.md) for the full description.
 
 ### Assertions in kernels
 
@@ -112,10 +110,6 @@ Per-backend support:
 
 **Important.** Avoid kernel `print()` calls in production code where you can. Quadrants synchronizes the compute queue after every dispatch of a kernel that contains a `print()` so the output appears as close as possible to the call site. The synchronization happens unconditionally on every launch of that kernel, even when the surrounding control flow leaves the `print()` unreached at runtime; the cost is the full per-launch sync overhead, not just the cost of the `print()` itself.
 
-## Under the hood: compiler and runtime internals
-
-The tools below expose Quadrants' own compiler and runtime internals. They are for understanding exactly what Quadrants generated, or for debugging Quadrants itself, rather than for debugging the logic of your own kernels.
-
 ### Dumping compiled IR
 
 To inspect the compiled intermediate representation, use the `QD_DUMP_IR` environment variable:
@@ -125,21 +119,6 @@ QD_DUMP_IR=1 QD_OFFLINE_CACHE=0 python my_script.py
 ```
 
 Compiled kernels will be written to `/tmp/ir` by default. Use `QD_DEBUG_DUMP_PATH=` to redirect to a custom directory.
-
-### Running hand-edited IR or PTX
-
-A dump can be edited and fed back in, which is a quick way to try an instruction sequence by hand before changing the compiler. `QD_LOAD_IR=1` makes the CPU, CUDA and AMDGPU backends read LLVM IR (the representation they compile through) back from the dump directory instead of generating it; `QUADRANTS_LOAD_PTX=1` does the same for PTX (the assembly the NVIDIA driver consumes) on CUDA. Both caches have to be off in the script under test:
-
-```python
-qd.init(arch=qd.cuda, offline_cache=False, src_ll_cache=False)
-```
-
-```bash
-QD_DUMP_IR=1 QD_DEBUG_DUMP_PATH=/tmp/ir python my_script.py  # dump, then edit the files under /tmp/ir
-QD_LOAD_IR=1 QD_DEBUG_DUMP_PATH=/tmp/ir python my_script.py  # run what you edited
-```
-
-**Important.** The replacement files are only read while a kernel is being compiled, and a cached kernel is handed back without compiling, so with either cache left on, an already-cached kernel keeps running its old code and nothing says so. `qd.init` raises a `ValueError` instead of letting that happen. Unlike `offline_cache`, [`src_ll_cache`](./fastcache.md) has no environment variable, so it has to be passed to `qd.init`.
 
 ### Tracing adstack heap allocations
 
