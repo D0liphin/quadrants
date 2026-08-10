@@ -38,7 +38,7 @@ a = x[-1]     # AssertionError in debug mode
 
 #### Adstack overflow
 
-The adstack overflow check on reverse-mode autodiff runs always, on every backend, regardless of `debug`. A push past the per-stack capacity raises `QuadrantsAssertionError("[Aa]dstack overflow")` at the next Quadrants Python entry that polls the overflow flag after the offending kernel has executed - kernel launch, host-side field / ndarray read, or `qd.sync()`. On CPU this is the entry of the offending launch itself; on GPU it can be one or more entries later, since the GPU may not have run the offending push by the time the poll at end-of-launch fires. The error message describes the cause (untracked tensor mutation between launches, or sizer under-estimate caused by a bug in Quadrants) and the recovery flow; see [Autodiff -> What can go wrong](autodiff.md) for the full description.
+The adstack is the per-thread stack that reverse-mode autodiff uses to save the intermediate values a kernel produces, so that the backward pass can read them back. Its overflow check runs always, on every backend, regardless of `debug`. A push past the per-stack capacity raises `QuadrantsAssertionError("[Aa]dstack overflow")` at the next Quadrants Python entry that polls the overflow flag after the offending kernel has executed - kernel launch, host-side field / ndarray read, or `qd.sync()`. On CPU this is the entry of the offending launch itself; on GPU it can be one or more entries later, since the GPU may not have run the offending push by the time the poll at end-of-launch fires. The error message describes the cause (untracked tensor mutation between launches, or Quadrants under-estimating the capacity it needed to reserve, which is a bug in Quadrants) and the recovery flow; see [Autodiff -> What can go wrong](autodiff.md) for the full description.
 
 ### Assertions in kernels
 
@@ -109,6 +109,10 @@ Per-backend support:
 **Note.** Output from GPU kernels appears in order despite parallel execution because all kernels are queued in the same compute stream.
 
 **Important.** Avoid kernel `print()` calls in production code where you can. Quadrants synchronizes the compute queue after every dispatch of a kernel that contains a `print()` so the output appears as close as possible to the call site. The synchronization happens unconditionally on every launch of that kernel, even when the surrounding control flow leaves the `print()` unreached at runtime; the cost is the full per-launch sync overhead, not just the cost of the `print()` itself.
+
+## Under the hood: compiler and runtime internals
+
+The tools below expose Quadrants' own compiler and runtime internals. They are for understanding exactly what Quadrants generated, or for debugging Quadrants itself, rather than for debugging the logic of your own kernels.
 
 ### Dumping compiled IR
 
