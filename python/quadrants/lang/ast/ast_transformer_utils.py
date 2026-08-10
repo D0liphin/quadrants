@@ -217,6 +217,14 @@ class ASTTransformerGlobalContext:
         self.caller_in_non_static_control_flow: bool = False
 
 
+# Memo for ASTTransformerFuncContext.get_pos_info. Process-global because the win comes from reuse ACROSS transforms
+# of the same function (each is transformed once per inlined call site, ~44x on the genesis step kernel), which is
+# exactly what a per-context cache would miss. Bounded in practice by (#functions x #AST nodes) and holds only short
+# strings; entries stay valid for the life of the process because a given file+function's source cannot change under
+# a running interpreter.
+_POS_INFO_CACHE: dict[tuple, str] = {}
+
+
 class ASTTransformerFuncContext:
     def __init__(
         self,
@@ -402,6 +410,34 @@ class ASTTransformerFuncContext:
             raise QuadrantsNameError(f'Name "{name}" is not defined')
 
     def get_pos_info(self, node: ast.AST) -> str:
+        # Called for EVERY stmt/expr node visited (see ASTTransformerBase.__call__), purely to build the
+        # source-position banner used in error messages and DebugInfo. It is pure text formatting, and it dominated
+        # the Python side of a warm recompile: on the genesis _step_kernel it was ~9.6 s of a 17.5 s AST transform,
+        # mostly inside textwrap (614k wrap calls).
+        #
+        # The same ~63 functions are transformed ~44 times each (once per inlined call site), so the identical source
+        # position is formatted over and over. Memoize on the values the output actually depends on. `self.src` is not
+        # in the key: for a given file + function + indent + line offset it is that function's source, which cannot
+        # differ within a process.
+        key = (
+            self.file,
+            self.func.func.__name__,
+            self.indent,
+            self.lineno_offset,
+            node.lineno,
+            node.col_offset,
+            node.end_lineno,
+            node.end_col_offset,
+            node.__class__.__name__,
+        )
+        cached = _POS_INFO_CACHE.get(key)
+        if cached is not None:
+            return cached
+        result = self._build_pos_info(node)
+        _POS_INFO_CACHE[key] = result
+        return result
+
+    def _build_pos_info(self, node: ast.AST) -> str:
         msg = f'File "{self.file}", line {node.lineno + self.lineno_offset}, in {self.func.func.__name__}:\n'
         col_offset = self.indent + node.col_offset
         end_col_offset = self.indent + node.end_col_offset
