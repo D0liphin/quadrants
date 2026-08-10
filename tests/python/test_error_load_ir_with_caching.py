@@ -1,7 +1,6 @@
-"""QD_LOAD_IR / QUADRANTS_LOAD_PTX read replacement IR / PTX from ``debug_dump_path``, which codegen
-only does for a kernel it actually compiles. A cached kernel skips codegen, so the edited files would
-be ignored without any diagnostic. ``qd.init`` rejects the combination instead, for the backends that
-actually read each variable."""
+"""QD_LOAD_IR / QUADRANTS_LOAD_PTX read replacement IR / PTX from ``debug_dump_path``, which codegen only does for a
+kernel it actually compiles. A cached kernel skips codegen, so the edited files would be ignored with no diagnostic.
+``qd.init`` rejects the combination instead, for the backends that actually read each variable."""
 
 import os
 from contextlib import contextmanager
@@ -73,9 +72,9 @@ def test_no_error_without_load_env_vars():
         qd.init(arch=LLVM_ARCH, log_level="warn", offline_cache=True, src_ll_cache=True)
 
 
-# Checks against the helper directly, so each arch can be exercised on any test machine. Going through
-# qd.init would not work here: adaptive_arch_select silently falls back to the CPU arch for a backend
-# that is unavailable, which would turn a non-LLVM arch back into an LLVM one.
+# Checks against the helper directly, so each arch can be exercised on any test machine. Going through qd.init would
+# not work: adaptive_arch_select silently falls back to the CPU arch for an unavailable backend, which would turn a
+# non-LLVM arch back into an LLVM one.
 
 
 @pytest.mark.parametrize("arch", [qd.vulkan, qd.metal])

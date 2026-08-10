@@ -89,21 +89,6 @@ These environment variables dump the IR so you can see the effect of each pass. 
 
 Setting `qd.init(print_ir=True)` prints the IR to the console at pipeline stages instead of writing files.
 
-### Advanced: running hand-edited IR or PTX
-
-Two further environment variables read code *back* out of `debug_dump_path`, so you can dump a kernel, hand-edit the dumped file, and run your edited version. This is a compiler-debugging workflow rather than an everyday one.
-
-- `QD_LOAD_IR=1` - reparses `<debug_dump_path>/<task>_llvm.ll` and uses it instead of the code the compiler just generated. This applies only to the backends that generate code through the LLVM compiler toolchain, namely CPU, CUDA and AMDGPU; the Vulkan and Metal backends never read it. The value is parsed as an integer, so `QD_LOAD_IR=0` leaves it off.
-- `QUADRANTS_LOAD_PTX=1` - reads `<debug_dump_path>/<name>.ptx` and uses it as the kernel's PTX, the intermediate assembly format that the NVIDIA driver turns into machine code. CUDA only. This one is enabled by being set to *any* value, including `0`, so unset it rather than setting it to `0` to turn it off.
-
-Both replacements happen while a kernel is being compiled, and a cached kernel is returned without compiling anything, so you have to switch off both the [offline cache](init_options.md#offline_cache) and [fastcache](fastcache.md), whose `qd.init` parameter is `src_ll_cache`, or your edited file will simply not be read:
-
-```python
-qd.init(arch=qd.cuda, offline_cache=False, src_ll_cache=False)
-```
-
-`qd.init` raises a `ValueError` if you set either variable on a backend that reads it while either cache is still enabled, rather than letting the run silently execute the unedited kernel.
-
 ## Under the hood: per-task scoping
 
 Once the kernel has been split into offloaded tasks, both CSE and the CFG optimization run over **one offloaded task's IR at a time**, never over the whole `qd.kernel` at once. This is both faster to analyze and safe: because each task is a separate device launch, a value held in a register in one task cannot survive into the next one, so there is never anything to deduplicate or forward across a task boundary. Anything written to global memory is treated as potentially read by a later task, so no store another task might need is dropped.
