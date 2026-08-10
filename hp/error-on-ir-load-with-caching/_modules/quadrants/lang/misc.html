@@ -743,15 +743,11 @@
 
 
 <span class="k">def</span><span class="w"> </span><span class="nf">_check_ir_load_envs_against_caching</span><span class="p">(</span><span class="n">cfg</span><span class="p">,</span> <span class="n">src_ll_cache</span><span class="p">:</span> <span class="nb">bool</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Reject QD_LOAD_IR / QUADRANTS_LOAD_PTX when a cache could stop codegen from ever reading the files.</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Reject QD_LOAD_IR / QUADRANTS_LOAD_PTX when caching could stop codegen from ever reading the files.</span>
 
-<span class="sd">    Both variables make codegen discard the module it just built and use IR / PTX read back from ``debug_dump_path``</span>
-<span class="sd">    instead. Codegen only runs on a cache miss, since ``KernelCompilationManager::load_or_compile`` returns the cached</span>
-<span class="sd">    artifact otherwise, so with caching enabled an already-cached kernel is handed back untouched and the edited file is</span>
-<span class="sd">    never read. The kernel still runs, it just is not the code that was edited, and nothing says so.</span>
-
-<span class="sd">    Must be called after arch selection: each variable is only read by some backends, and ``adaptive_arch_select`` may</span>
-<span class="sd">    have fallen back to an arch other than the one requested.</span>
+<span class="sd">    A cached kernel skips codegen, so edited IR / PTX in ``debug_dump_path`` is silently ignored. Call after arch</span>
+<span class="sd">    selection: each variable is read by only some backends, and ``adaptive_arch_select`` may not have picked the</span>
+<span class="sd">    requested arch.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="n">active</span> <span class="o">=</span> <span class="p">[]</span>
     <span class="c1"># codegen_llvm.cpp reads QD_LOAD_IR via get_environ_config, which parses the value as an int, so &quot;0&quot; leaves it off.</span>
