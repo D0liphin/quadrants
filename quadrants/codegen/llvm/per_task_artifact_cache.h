@@ -14,7 +14,7 @@ namespace quadrants::lang {
 // One offloaded task's fully-compiled artifact, persisted so a *fresh process* can launch that task without re-running
 // any of its compilation: no CHI->LLVM codegen, no link, no optimize, no PTX, no ptxas. Keyed by the per-task IR key
 // (`get_hashed_per_task_cache_key` + "#index"), which is derived from the task IR *before* codegen -- that is what
-// makes it hittable on a warm one-task edit (§9.D Part B).
+// makes it hittable on a warm one-task edit.
 //
 // The cubin alone is NOT sufficient to launch. The kernel launcher and the CUDA graph builder consume `OffloadedTask`
 // metadata -- entry-function name, block/grid dim, `graph_do_while_level_id`, `stream_parallel_group_id`,
