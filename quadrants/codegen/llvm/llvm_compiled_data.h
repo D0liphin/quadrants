@@ -202,9 +202,28 @@ struct LLVMCompiledTask {
   QD_IO_DEF(tasks);
 };
 
+// One entry of the per-task cuLink path: the device code for a single offloaded task, plus everything the launcher /
+// CUDA graph builder needs for it.
+//
+// `key` is the per-task IR key (`get_hashed_per_task_cache_key` + "#index"), computed from the task IR *before*
+// codegen. It is carried here for the cross-process artifact cache to key on; the relocatable-cubin cache below
+// cannot use it yet (see `get_or_build_construct_cubin`). The metadata fields ride along because the JIT is the
+// component that ends up holding the freshly built cubin.
+struct PerConstructArtifact {
+  std::unique_ptr<llvm::Module> module{nullptr};
+  std::vector<char> cubin;
+  std::string key;
+  std::vector<OffloadedTask> tasks;
+  std::vector<int> used_tree_ids;
+  std::vector<int> struct_for_tls_sizes;
+};
+
 struct LLVMCompiledKernel {
   std::vector<OffloadedTask> tasks;
   std::unique_ptr<llvm::Module> module{nullptr};
+  // Per-task self-contained artifacts for the relocatable-cubin + cuLink path. Empty => the JIT uses the whole-module
+  // `module`. Transient (not part of QD_IO_DEF).
+  std::vector<PerConstructArtifact> per_construct_artifacts;
   // Per-task compile-cache stats for the compile that produced this kernel (transient, not serialized). Set by the
   // codegen driver; surfaced host-side via `LLVM::CompiledKernelData::get_per_task_cache_stats`.
   PerTaskCacheStats per_task_cache_stats;

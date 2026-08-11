@@ -65,6 +65,14 @@ class JITSessionCUDA : public JITSession {
                  llvm::DataLayout data_layout,
                  ProgramImpl *program_impl);
   JITModule *add_module(std::unique_ptr<llvm::Module> M, int max_reg) override;
+  JITModule *add_module_culink(std::vector<PerConstructArtifact> artifacts, int max_reg) override;
+  // Return a relocatable cubin for one self-contained task module, hitting a disk cache (skips PTX + ptxas on a warm
+  // unchanged task). Keyed on the module's LLVM-IR text; `ir_key` (the per-task IR cache key) is accepted but not yet
+  // used, because it omits the entry-point symbol names -- see the definition.
+  std::vector<char> get_or_build_construct_cubin(std::unique_ptr<llvm::Module> &module, const std::string &ir_key);
+  // `ptxas -c` + atomic write of the result. Split out from the above because it holds no shared state, so it is
+  // safe to call concurrently.
+  std::vector<char> assemble_and_store_cubin(const std::string &ptx, const std::string &cubin_path);
   llvm::DataLayout get_data_layout() override;
 
  private:

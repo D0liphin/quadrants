@@ -27,8 +27,8 @@ namespace quadrants::lang {
 // `mu`. The expensive `compile_task` on a miss runs outside `mu`, so worker parallelism is preserved.
 //
 // `entries` is declared after `ctx` so it is destroyed first: the cached modules must outlive nothing and must be torn
-// down before the context that owns them. Unbounded for now (prototype); a deployment wants an LRU + disk tier (see
-// perso_hugh per-construct compilation design doc, S2 / slice-1b).
+// down before the context that owns them. Unbounded for now: entries are small and a Program is short-lived
+// relative to the cache's value, but a long-running process would want an LRU bound here.
 struct PerTaskModuleCache {
   struct Entry {
     std::unique_ptr<llvm::Module> module;  // lives in `ctx`
