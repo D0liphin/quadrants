@@ -20,6 +20,7 @@
 #include "quadrants/analysis/offline_cache_util.h"
 #include "quadrants/rhi/device_capability.h"
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -137,8 +138,33 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
   }
   worker.flush();
 
+  // Per-task cuLink path: produce one self-contained artifact per offloaded task -- link its runtime deps and
+  // optimize it -- BEFORE the whole-module link consumes `data`. These flow to the CUDA JIT, which compiles each to a
+  // relocatable cubin (hitting the on-disk cubin cache when the task is unchanged) and `cuLink`s them into one
+  // CUmodule.
+  std::vector<PerConstructArtifact> per_construct_artifacts;
+  for (int i = 0; i < (int)data.size(); i++) {
+    if (!data[i] || !data[i]->module)
+      continue;
+    PerConstructArtifact art;
+    std::vector<std::unique_ptr<LLVMCompiledTask>> one;
+    one.push_back(std::make_unique<LLVMCompiledTask>(data[i]->clone()));
+    auto linked_one = tlctx_.link_compiled_tasks(std::move(one));
+    optimize_module(linked_one.module.get());
+    art.module = std::move(linked_one.module);
+    // Carry the launch/graph metadata down to the JIT: the cubin alone cannot be launched.
+    art.tasks = linked_one.tasks;
+    // Sorted for deterministic on-disk bytes (these are unordered_sets upstream).
+    art.used_tree_ids.assign(data[i]->used_tree_ids.begin(), data[i]->used_tree_ids.end());
+    art.struct_for_tls_sizes.assign(data[i]->struct_for_tls_sizes.begin(), data[i]->struct_for_tls_sizes.end());
+    std::sort(art.used_tree_ids.begin(), art.used_tree_ids.end());
+    std::sort(art.struct_for_tls_sizes.begin(), art.struct_for_tls_sizes.end());
+    per_construct_artifacts.push_back(std::move(art));
+  }
+
   auto llvm_compiled_kernel = tlctx_.link_compiled_tasks(std::move(data));
   optimize_module(llvm_compiled_kernel.module.get());
+  llvm_compiled_kernel.per_construct_artifacts = std::move(per_construct_artifacts);
   llvm_compiled_kernel.per_task_cache_stats = {(int)offloads.size(), n_cache_hit.load(), n_recompiled.load()};
   return llvm_compiled_kernel;
 }
