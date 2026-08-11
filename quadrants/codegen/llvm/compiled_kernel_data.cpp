@@ -29,7 +29,7 @@ std::unique_ptr<lang::CompiledKernelData> CompiledKernelData::clone() const {
 CompiledKernelData::Err CompiledKernelData::check() const {
   const auto &compiled_data = data_.compiled_data;
   const auto &tasks = compiled_data.tasks;
-  // Per-task cuLink path (§9.D): when one or more tasks were served from the on-disk artifact cache there is no
+  // Per-task cuLink path: when one or more tasks were served from the on-disk artifact cache there is no
   // whole-kernel LLVM module in this process -- the device code is a set of per-task cubins that the CUDA JIT
   // device-links. The module-based checks below are meaningless (and would null-deref), so validate what this
   // representation actually guarantees: every task must have code, i.e. an artifact carrying it.
@@ -122,10 +122,10 @@ CompiledKernelData::Err CompiledKernelData::dump_impl(CompiledKernelDataFile &fi
   } catch (const liong::json::JsonException &) {
     return Err::kSerMetadataFailed;
   }
-  // Per-task cuLink path (§9.D): this kernel has no whole-kernel LLVM module -- its device code is a set of per-task
+  // Per-task cuLink path: this kernel has no whole-kernel LLVM module -- its device code is a set of per-task
   // cubins in the PerTaskArtifactCache. It must still get a normal `.qdc` entry, otherwise the whole-kernel cache
-  // stays permanently empty and every run re-pays the per-construct path (measured as a ~50x regression on
-  // warm-no-change, §10.0). The metadata already carries `tasks` and `per_task_artifact_keys`, which is everything
+  // stays permanently empty and every run re-pays the per-construct path, which measured as a ~50x regression on
+  // warm-no-change. The metadata already carries `tasks` and `per_task_artifact_keys`, which is everything
   // needed to rebuild the kernel on load, so write an empty src_code rather than LLVM IR text.
   if (!data_.compiled_data.module) {
     if (data_.compiled_data.per_task_artifact_keys.empty()) {
