@@ -30,8 +30,8 @@ class JITSession {
 
   // Per-task cubin path: assemble one JIT module from several self-contained sub-modules by emitting a relocatable
   // cubin per sub-module and device-linking them (`cuLink`). Only the CUDA backend implements this; the default
-  // errors so other backends are unaffected. Each artifact is one offloaded task, plus its IR key and launch
-  // metadata.
+  // errors so other backends are unaffected. Each artifact is one offloaded task: either a module to compile or a
+  // cubin already loaded from the on-disk per-task artifact cache, plus its IR key and launch metadata.
   virtual JITModule *add_module_culink(std::vector<PerConstructArtifact> artifacts, int max_reg = 0) {
     QD_NOT_IMPLEMENTED
   }

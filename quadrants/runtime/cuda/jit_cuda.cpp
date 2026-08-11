@@ -8,6 +8,7 @@
 #include "quadrants/runtime/cuda/jit_cuda.h"
 #include "quadrants/runtime/llvm/llvm_context.h"
 #include "quadrants/codegen/ir_dump.h"
+#include "quadrants/codegen/llvm/per_task_artifact_cache.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Transforms/Scalar/LoopStrengthReduce.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
@@ -215,16 +216,15 @@ static std::mutex g_ptxgen_mu;
 //
 // The key is a hash of the module's LLVM-IR text, which is what makes the cache safe to share across kernels: the
 // text contains the task's entry-point symbol names, so two kernels whose tasks differ only in name cannot collide
-// on one cubin. Keying on the caller's edit-stable per-task IR key instead (`ir_key`) would be strictly better --
-// that key does not move when unrelated parts of the kernel change, and it is known before codegen runs -- but it
-// omits the symbol names by design, so it is only safe once the cached record carries the task's launch metadata
-// alongside its code. Until then `ir_key` stays unused.
+// on one cubin. The caller's edit-stable per-task IR key is deliberately NOT used here even though it is available:
+// it omits the symbol names by design, so a cross-kernel hit would return a cubin defining someone else's entry
+// point. Edit-stable cross-process reuse is the `PerTaskArtifactCache`'s job instead -- its records carry the launch
+// metadata alongside the code, so the names travel with the cubin and stay consistent.
 //
 // Cubins are SM-specific (`ptxas -arch=`), so the directory is namespaced by mcpu -- otherwise a cache populated on
 // one GPU would be silently loaded on another. `fast_math` and the rest of the compile config are already folded into
 // the IR key upstream.
-std::vector<char> JITSessionCUDA::get_or_build_construct_cubin(std::unique_ptr<llvm::Module> &module,
-                                                               const std::string &ir_key) {
+std::vector<char> JITSessionCUDA::get_or_build_construct_cubin(std::unique_ptr<llvm::Module> &module) {
   namespace fs = std::filesystem;
   const std::string mcpu = CUDAContext::get_instance().get_mcpu();
   const std::string leaf = "culink_cubins_" + mcpu;
@@ -233,18 +233,11 @@ std::vector<char> JITSessionCUDA::get_or_build_construct_cubin(std::unique_ptr<l
   std::error_code ec;
   fs::create_directories(dir, ec);
 
-  std::string key;
-  if (!ir_key.empty()) {
-    // Hash the IR key (rather than using it raw) so the filename is a fixed-length hex string regardless of the
-    // key's prefix/suffix shape, and so fast_math/mcpu are folded into the name and not just the directory.
-    key = ptx_cache_->make_cache_key(ir_key + "|" + mcpu, config_.fast_math);
-  } else {
-    std::string llvm_ir_str;
-    llvm::raw_string_ostream os(llvm_ir_str);
-    module->print(os, nullptr);
-    os.flush();
-    key = ptx_cache_->make_cache_key(llvm_ir_str, config_.fast_math);
-  }
+  std::string llvm_ir_str;
+  llvm::raw_string_ostream os(llvm_ir_str);
+  module->print(os, nullptr);
+  os.flush();
+  const std::string key = ptx_cache_->make_cache_key(llvm_ir_str, config_.fast_math);
   auto cubin_path = fs::path(dir) / (key + ".cubin");
 
   // The whole-module loader dumps each module's PTX under `debug_dump_path`; this path replaces it for every CUDA
@@ -304,7 +297,26 @@ JITModule *JITSessionCUDA::add_module_culink(std::vector<PerConstructArtifact> a
   std::vector<std::vector<char>> cubins;
   cubins.reserve(artifacts.size());
   for (auto &art : artifacts) {
-    cubins.push_back(get_or_build_construct_cubin(art.module, art.key));
+    if (!art.cubin.empty()) {
+      // Already resolved from the on-disk artifact cache by the codegen driver: no module was ever built for this
+      // task, so there is nothing to compile or store.
+      cubins.push_back(std::move(art.cubin));
+      continue;
+    }
+    auto cubin = get_or_build_construct_cubin(art.module);
+    // Persist the COMPLETE record (code + launch metadata). The JIT is the only component that holds the cubin and
+    // codegen is the only one that holds the metadata, so the metadata is carried down here specifically so this
+    // side can write a record sufficient to launch the task without any recompile.
+    if (!art.key.empty()) {
+      PerTaskArtifactCache cache(pertask_artifact_dir_for(config_.offline_cache_file_path));
+      PerTaskArtifact rec;
+      rec.tasks = art.tasks;
+      rec.used_tree_ids = art.used_tree_ids;
+      rec.struct_for_tls_sizes = art.struct_for_tls_sizes;
+      rec.cubin = cubin;
+      cache.store(art.key, rec);
+    }
+    cubins.push_back(std::move(cubin));
   }
 
   CUDAContext::get_instance().make_current();

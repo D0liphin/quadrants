@@ -373,7 +373,8 @@ std::string get_hashed_per_construct_cache_key(const CompileConfig &config,
   // cold-compile blowup). This is sound because `Program::destroy_snode_tree` WIPES the per-construct cache: a tree
   // instance's layout is immutable once materialized, and the only way to change it (or to recycle a tree id via
   // `free_snode_tree_ids_`) is to destroy + re-add, which clears the cache. So within any interval with no destroy,
-  // tree-id -> layout is a stable bijection here.
+  // tree-id -> layout is a stable bijection here. The cross-process disk tier has no such lifetime guarantee and
+  // re-adds the full layout hash to its (persisted) key.
   for (const SNode *root : gather_ir_snode_roots(construct)) {
     std::string tree_id_key = std::to_string(root->get_snode_tree_id());
     hasher.process(tree_id_key.begin(), tree_id_key.end());
@@ -412,6 +413,36 @@ std::string get_hashed_per_construct_cache_key(const CompileConfig &config,
 
   auto res = picosha2::get_hash_hex_string(hasher);
   res.insert(res.begin(), 'C');  // construct-key prefix; distinct from 'K' (task) and 'T' (kernel)
+  return res;
+}
+
+std::string get_hashed_per_construct_disk_key(const CompileConfig &config,
+                                              const DeviceCapabilityConfig &caps,
+                                              IRNode *construct,
+                                              const Kernel *kernel) {
+  // Start from the in-memory key (config + ABI + tree ids + graph region tags + body + autodiff mode), then fold the
+  // two cross-process wideners it omits. Reusing it keeps the two keys in lockstep as the basis evolves.
+  const std::string base = get_hashed_per_construct_cache_key(config, construct, kernel);
+  auto caps_key = get_offline_cache_key_of_device_caps(caps);  // byte vector, not a string
+
+  picosha2::hash256_one_by_one hasher;
+  hasher.process(base.begin(), base.end());
+  hasher.process(caps_key.begin(), caps_key.end());
+  // Full SNode layout per touched tree. Memoized by tree id: a construct commonly touches the same root repeatedly,
+  // and the recursive serialization is O(tree_size) on what can be a very large genesis tree.
+  std::map<int, std::string> layout_by_tree;
+  for (const SNode *root : gather_ir_snode_roots(construct)) {
+    const int tid = root->get_snode_tree_id();
+    auto it = layout_by_tree.find(tid);
+    if (it == layout_by_tree.end()) {
+      it = layout_by_tree.emplace(tid, get_hashed_offline_cache_key_of_snode(root)).first;
+    }
+    hasher.process(it->second.begin(), it->second.end());
+  }
+  hasher.finish();
+
+  auto res = picosha2::get_hash_hex_string(hasher);
+  res.insert(res.begin(), 'D');  // cross-process construct key; distinct from 'C' (in-memory construct)
   return res;
 }
 

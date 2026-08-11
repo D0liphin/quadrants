@@ -5,6 +5,7 @@
 #include "quadrants/codegen/cpu/codegen_cpu.h"
 #include "quadrants/codegen/llvm/llvm_compiled_data.h"
 #include "quadrants/codegen/llvm/per_task_module_cache.h"
+#include "quadrants/codegen/llvm/per_task_artifact_cache.h"
 #include "quadrants/program/program.h"
 #include "quadrants/codegen/codegen.h"
 #include "quadrants/codegen/llvm/struct_llvm.h"
@@ -30,6 +31,9 @@ LlvmProgramImpl::LlvmProgramImpl(CompileConfig &config_, KernelProfilerBase *pro
     : ProgramImpl(config_), compilation_workers("compile", config_.print_ir ? 1 : config_.num_compile_threads) {
   runtime_exec_ = std::make_unique<LlvmRuntimeExecutor>(config_, profiler, this);
   cache_data_ = std::make_unique<LlvmOfflineCache>();
+  // Resolve the per-task artifact directory once, here: loading an artifact-backed kernel from the offline cache
+  // happens deep in CompiledKernelData::load_impl, which has no CompileConfig to derive it from.
+  set_pertask_artifact_dir_from_offline_cache(config_.offline_cache_file_path);
 }
 
 LlvmProgramImpl::~LlvmProgramImpl() {
