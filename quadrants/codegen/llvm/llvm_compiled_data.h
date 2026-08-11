@@ -224,6 +224,12 @@ struct LLVMCompiledKernel {
   // Per-task self-contained artifacts for the relocatable-cubin + cuLink path. Empty => the JIT uses the whole-module
   // `module`. Transient (not part of QD_IO_DEF).
   std::vector<PerConstructArtifact> per_construct_artifacts;
+  // The `key` of each entry in `per_construct_artifacts`, in order. Unlike the artifacts themselves this IS
+  // serialized (see QD_IO_DEF below): it is how a kernel whose code lives in per-task cubins gets a normal
+  // whole-kernel `.qdc` entry. Without it such a kernel could not be persisted at all, the whole-kernel cache would
+  // stay permanently empty, and every run would re-pay the per-construct path. On load the artifacts are rebuilt
+  // from these keys via the `PerTaskArtifactCache`.
+  std::vector<std::string> per_task_artifact_keys;
   // Per-task compile-cache stats for the compile that produced this kernel (transient, not serialized). Set by the
   // codegen driver; surfaced host-side via `LLVM::CompiledKernelData::get_per_task_cache_stats`.
   PerTaskCacheStats per_task_cache_stats;
@@ -234,7 +240,7 @@ struct LLVMCompiledKernel {
       : tasks(std::move(tasks)), module(std::move(module)) {
   }
   LLVMCompiledKernel clone() const;
-  QD_IO_DEF(tasks);
+  QD_IO_DEF(tasks, per_task_artifact_keys);
 };
 
 // The exclusive end of the maximal run of stream-parallel tasks starting at `start` that belong to the SAME

@@ -40,6 +40,16 @@ std::string get_hashed_per_construct_cache_key(const CompileConfig &config,
                                                IRNode *construct,
                                                const Kernel *kernel);
 
+// CROSS-PROCESS construct key. Same basis as `get_hashed_per_construct_cache_key` but restores the two wideners that
+// the in-memory key deliberately drops because they are invariant within one `Program`: the full SNode-layout hash
+// (struct-access arithmetic is inlined into the compiled tasks, so two identical constructs over differently-laid-out
+// trees must not share an entry) and the device capabilities. Layout hashing is O(tree_size), so it is memoized per
+// snode-tree within a single call -- computing it once per construct was a >20x cold-compile blowup.
+std::string get_hashed_per_construct_disk_key(const CompileConfig &config,
+                                              const DeviceCapabilityConfig &caps,
+                                              IRNode *construct,
+                                              const Kernel *kernel);
+
 void gen_offline_cache_key(IRNode *ast, std::ostream *os);
 
 }  // namespace quadrants::lang
