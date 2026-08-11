@@ -300,10 +300,6 @@ Module Contents
    .. py:attribute:: lineno_offset
 
 
-   .. py:attribute:: pos_headers
-      :type:  dict[int, str]
-
-
    .. py:attribute:: start_lineno
 
 
