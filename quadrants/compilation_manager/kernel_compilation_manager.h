@@ -54,6 +54,11 @@ struct CompileResult {
   int per_offload_total{0};
   int per_offload_cache_hit{0};
   int per_offload_recompiled{0};
+  // Per-construct FRONTEND cache stats. `-1` => the per-construct frontend split did not run for this compile.
+  // Distinct from the per-task counts above: a construct can expand to several offloaded tasks.
+  int per_construct_total{-1};
+  int per_construct_cache_hit{-1};
+  int per_construct_recompiled{-1};
 };
 
 namespace tests {

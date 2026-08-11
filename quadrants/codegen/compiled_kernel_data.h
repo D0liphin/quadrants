@@ -19,6 +19,12 @@ struct PerTaskCacheStats {
   int total{0};
   int cache_hit{0};
   int recompiled{0};
+  // Per-construct FRONTEND cache stats, recorded by the per-construct frontend split and read back here by the
+  // codegen driver. `-1` means the split did not run for this compile (the whole-kernel path took it, e.g. autodiff
+  // or mesh), so Python can tell "split absent" from "0 constructs".
+  int construct_total{-1};
+  int construct_cache_hit{-1};
+  int construct_recompiled{-1};
 };
 
 class KernelLaunchHandle {

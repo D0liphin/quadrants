@@ -28,16 +28,22 @@ class FeLlCacheObservations:
 
 @dataclass
 class PerOffloadCacheObservations:
-    """Per-offloaded-task compilation cache stats for one kernel compile.
+    """Per-offloaded-task and per-construct compilation cache stats for one kernel compile.
 
-    Counts the per-task codegen cache (LLVM module reuse per offloaded task; always active on the LLVM backends). On
-    a warm compile where only one task changed, the expected result is ``recompiled == 1`` and
-    ``cache_hit == total - 1``. Counts (not wall time) so the behavior can be asserted deterministically in tests.
+    ``constructs_*`` count the per-*task* codegen cache (LLVM module reuse per offloaded task; always active on the
+    LLVM backends). ``frontend_constructs_*`` count the per-*construct* FRONTEND cache (reuse of the
+    simplify/mgp/offload output per top-level construct) and are ``-1`` when the per-construct frontend split did not
+    run for this compile. On a warm compile where only one construct changed, the expected result is
+    ``recompiled == 1`` and ``cache_hit == total - 1`` at whichever layer ran. Counts (not wall time) so the behavior
+    can be asserted deterministically in tests.
     """
 
     constructs_total: int = 0
     constructs_cache_hit: int = 0
     constructs_recompiled: int = 0
+    frontend_constructs_total: int = -1
+    frontend_constructs_cache_hit: int = -1
+    frontend_constructs_recompiled: int = -1
 
 
 @dataclass
