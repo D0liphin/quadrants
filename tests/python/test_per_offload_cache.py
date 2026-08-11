@@ -16,10 +16,12 @@ import quadrants as qd
 from tests import test_utils
 
 # Distinct, deliberately-unusual constants so these tasks' cache keys do not collide with tasks other tests compiled.
-# The tiers under test are content-keyed and program-scoped, so a test sharing kernel bodies with another would find
-# its "cold" phase already warm.
+# Each test needs its OWN set: the tiers under test are content-keyed and program-scoped, so two tests with the same
+# kernel bodies would find the second one's "cold" phase already warm from the first.
 _C = (61001.0, 61002.0, 61003.0, 61004.0)
 _C_EDIT = 69999.0
+_C2 = (62001.0, 62002.0, 62003.0, 62004.0)
+_C2_EDIT = 68888.0
 _N = 8
 
 
@@ -64,3 +66,62 @@ def test_per_offload_cache_one_construct_edit() -> None:
     assert obs_edit.constructs_total == 4, obs_edit
     assert obs_edit.constructs_recompiled == 1, obs_edit
     assert obs_edit.constructs_cache_hit == 3, obs_edit
+
+
+@test_utils.test(arch=[qd.cpu, qd.cuda], offline_cache=False)
+def test_per_construct_frontend_cache_one_construct_edit() -> None:
+    """Per-construct FRONTEND cache.
+
+    Editing one construct recomputes exactly its frontend; the other three constructs are cloned out of the
+    program-scoped construct cache.
+    """
+
+    @qd.kernel
+    def kernel_a(x: qd.types.ndarray()) -> None:
+        for i in range(_N):
+            x[i] += _C2[0]
+        for i in range(_N):
+            x[i] += _C2[1]
+        for i in range(_N):
+            x[i] += _C2[2]
+        for i in range(_N):
+            x[i] += _C2[3]
+
+    @qd.kernel
+    def kernel_edit_one(x: qd.types.ndarray()) -> None:
+        for i in range(_N):
+            x[i] += _C2[0]
+        for i in range(_N):
+            x[i] += _C2[1]
+        for i in range(_N):
+            x[i] += _C2_EDIT
+        for i in range(_N):
+            x[i] += _C2[3]
+
+    arr = qd.ndarray(qd.f32, shape=(_N,))
+
+    kernel_a(arr)
+    obs_a = kernel_a._primal.per_offload_cache_observations
+
+    # Cold: empty construct cache, so all four constructs recompile their frontend.
+    assert obs_a.frontend_constructs_total == 4, obs_a
+    assert obs_a.frontend_constructs_recompiled == 4, obs_a
+    assert obs_a.frontend_constructs_cache_hit == 0, obs_a
+
+    # One edited construct recomputes its frontend; the three unchanged constructs are content-keyed cache hits
+    # (shared across the two kernels, same ABI/config).
+    kernel_edit_one(arr)
+    obs_edit = kernel_edit_one._primal.per_offload_cache_observations
+    assert obs_edit.frontend_constructs_total == 4, obs_edit
+    assert obs_edit.frontend_constructs_recompiled == 1, obs_edit
+    assert obs_edit.frontend_constructs_cache_hit == 3, obs_edit
+
+    # Numerical correctness of the cache-hit clone path: on fresh arrays, both kernels must produce the exact sums.
+    # A bad cloned construct would surface here (wrong / zeroed field).
+    a2 = qd.ndarray(qd.f32, shape=(_N,))
+    kernel_a(a2)
+    assert all(abs(float(v) - sum(_C2)) < 1.0 for v in a2.to_numpy()), a2.to_numpy()
+    e2 = qd.ndarray(qd.f32, shape=(_N,))
+    kernel_edit_one(e2)
+    expected = _C2[0] + _C2[1] + _C2_EDIT + _C2[3]
+    assert all(abs(float(v) - expected) < 1.0 for v in e2.to_numpy()), e2.to_numpy()

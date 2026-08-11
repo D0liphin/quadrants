@@ -724,6 +724,9 @@ class Kernel(FuncBase):
                     constructs_total=compile_result.per_offload_total,
                     constructs_cache_hit=compile_result.per_offload_cache_hit,
                     constructs_recompiled=compile_result.per_offload_recompiled,
+                    frontend_constructs_total=compile_result.per_construct_total,
+                    frontend_constructs_cache_hit=compile_result.per_construct_cache_hit,
+                    frontend_constructs_recompiled=compile_result.per_construct_recompiled,
                 )
                 if self.fast_checksum:
                     src_hasher.store(

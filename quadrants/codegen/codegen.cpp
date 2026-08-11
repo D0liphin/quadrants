@@ -18,6 +18,7 @@
 #include "quadrants/ir/statements.h"
 #include "quadrants/ir/transforms.h"
 #include "quadrants/analysis/offline_cache_util.h"
+#include "quadrants/program/per_construct_cache.h"
 #include "quadrants/rhi/device_capability.h"
 
 #include <algorithm>
@@ -166,6 +167,18 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
   optimize_module(llvm_compiled_kernel.module.get());
   llvm_compiled_kernel.per_construct_artifacts = std::move(per_construct_artifacts);
   llvm_compiled_kernel.per_task_cache_stats = {(int)offloads.size(), n_cache_hit.load(), n_recompiled.load()};
+  // If the per-construct frontend split ran for this kernel, surface its cache stats alongside the per-task ones.
+  // Recorded by `split_frontend_per_construct` on the program-scoped construct cache, keyed by kernel name.
+  {
+    auto &cc = kernel->program->per_construct_cache();
+    std::lock_guard<std::mutex> g(cc.mu);
+    auto it = cc.last_stats.find(kernel->get_name());
+    if (it != cc.last_stats.end()) {
+      llvm_compiled_kernel.per_task_cache_stats.construct_total = it->second.total;
+      llvm_compiled_kernel.per_task_cache_stats.construct_cache_hit = it->second.hit;
+      llvm_compiled_kernel.per_task_cache_stats.construct_recompiled = it->second.recompiled;
+    }
+  }
   return llvm_compiled_kernel;
 }
 
