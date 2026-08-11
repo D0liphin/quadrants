@@ -787,6 +787,10 @@
 <a class="viewcode-back" href="../../../../autoapi/quadrants/lang/ast/ast_transformer_utils/index.html#quadrants.lang.ast.ast_transformer_utils.ASTTransformerFuncContext.lineno_offset">[docs]</a>
         <span class="bp">self</span><span class="o">.</span><span class="n">lineno_offset</span> <span class="o">=</span> <span class="n">start_lineno</span> <span class="o">-</span> <span class="mi">1</span></div>
 
+<div class="viewcode-block" id="ASTTransformerFuncContext.pos_headers">
+<a class="viewcode-back" href="../../../../autoapi/quadrants/lang/ast/ast_transformer_utils/index.html#quadrants.lang.ast.ast_transformer_utils.ASTTransformerFuncContext.pos_headers">[docs]</a>
+        <span class="bp">self</span><span class="o">.</span><span class="n">pos_headers</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span></div>
+
 <div class="viewcode-block" id="ASTTransformerFuncContext.start_lineno">
 <a class="viewcode-back" href="../../../../autoapi/quadrants/lang/ast/ast_transformer_utils/index.html#quadrants.lang.ast.ast_transformer_utils.ASTTransformerFuncContext.start_lineno">[docs]</a>
         <span class="bp">self</span><span class="o">.</span><span class="n">start_lineno</span> <span class="o">=</span> <span class="n">start_lineno</span></div>
@@ -1031,7 +1035,15 @@
 <div class="viewcode-block" id="ASTTransformerFuncContext.get_pos_header">
 <a class="viewcode-back" href="../../../../autoapi/quadrants/lang/ast/ast_transformer_utils/index.html#quadrants.lang.ast.ast_transformer_utils.ASTTransformerFuncContext.get_pos_header">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">get_pos_header</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">node</span><span class="p">:</span> <span class="n">ast</span><span class="o">.</span><span class="n">AST</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
-        <span class="k">return</span> <span class="sa">f</span><span class="s1">&#39;File &quot;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">file</span><span class="si">}</span><span class="s1">&quot;, line </span><span class="si">{</span><span class="n">node</span><span class="o">.</span><span class="n">lineno</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="bp">self</span><span class="o">.</span><span class="n">lineno_offset</span><span class="si">}</span><span class="s1">, in </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">func</span><span class="o">.</span><span class="n">func</span><span class="o">.</span><span class="vm">__name__</span><span class="si">}</span><span class="s1">:</span><span class="se">\n</span><span class="s1">&#39;</span></div>
+        <span class="c1"># Memoised per line because this runs for every AST node, and the header depends on nothing else: `file`,</span>
+        <span class="c1"># `func` and `lineno_offset` are set in __init__ and never reassigned, so within one context the result is</span>
+        <span class="c1"># a function of `node.lineno` alone. Nodes sharing a line (an expression tree is many nodes on one line)</span>
+        <span class="c1"># then cost a dict lookup instead of an f-string over three attribute chains.</span>
+        <span class="n">header</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">pos_headers</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">node</span><span class="o">.</span><span class="n">lineno</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">header</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">header</span> <span class="o">=</span> <span class="sa">f</span><span class="s1">&#39;File &quot;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">file</span><span class="si">}</span><span class="s1">&quot;, line </span><span class="si">{</span><span class="n">node</span><span class="o">.</span><span class="n">lineno</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="bp">self</span><span class="o">.</span><span class="n">lineno_offset</span><span class="si">}</span><span class="s1">, in </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">func</span><span class="o">.</span><span class="n">func</span><span class="o">.</span><span class="vm">__name__</span><span class="si">}</span><span class="s1">:</span><span class="se">\n</span><span class="s1">&#39;</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">pos_headers</span><span class="p">[</span><span class="n">node</span><span class="o">.</span><span class="n">lineno</span><span class="p">]</span> <span class="o">=</span> <span class="n">header</span>
+        <span class="k">return</span> <span class="n">header</span></div>
 
 
 <div class="viewcode-block" id="ASTTransformerFuncContext.get_pos_info">
