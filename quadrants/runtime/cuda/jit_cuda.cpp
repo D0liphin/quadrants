@@ -3,6 +3,7 @@
 #include <iterator>
 #include <mutex>
 #include <random>
+#include <thread>
 #include <vector>
 
 #include "quadrants/runtime/cuda/jit_cuda.h"
@@ -207,7 +208,8 @@ static std::vector<char> ptx_to_relocatable_cubin(const std::string &ptx, const 
 }
 
 // LLVM->PTX stays serialised: the per-task modules are produced on the codegen worker threads and may share an
-// LLVMContext, which is not safe for concurrent codegen.
+// LLVMContext, which is not safe for concurrent codegen. `ptxas` runs outside this lock -- it is a subprocess on
+// private temp files, and it is where the cost actually is.
 static std::mutex g_ptxgen_mu;
 
 // Per-task relocatable-cubin disk cache. A warm run with an unchanged task hits the cache and skips PTX + ptxas
@@ -294,16 +296,39 @@ JITModule *JITSessionCUDA::add_module_culink(std::vector<PerConstructArtifact> a
   constexpr uint32 kCuJitErrorLogBufferSizeBytes = 6;
   auto &drv = CUDADriver::get_instance();
 
+  // Build the per-task cubins concurrently. This is the cold-path cost: 242 serial `ptxas -c` shell-outs were 9.8 s
+  // of a 13.7 s cubin build on the genesis kernel, while LLVM->PTX was only 1.6 s and stays serialised inside.
+  // Each entry writes only its own slot, so no synchronisation is needed beyond the ptxgen lock.
+  std::vector<std::vector<char>> built(artifacts.size());
+  {
+    std::atomic<std::size_t> next{0};
+    const unsigned nthreads =
+        std::min<unsigned>(std::max(1u, std::thread::hardware_concurrency()), (unsigned)artifacts.size());
+    std::vector<std::thread> pool;
+    for (unsigned t = 0; t < nthreads; t++) {
+      pool.emplace_back([&]() {
+        for (std::size_t i = next.fetch_add(1); i < artifacts.size(); i = next.fetch_add(1)) {
+          if (artifacts[i].cubin.empty()) {
+            built[i] = get_or_build_construct_cubin(artifacts[i].module);
+          }
+        }
+      });
+    }
+    for (auto &th : pool)
+      th.join();
+  }
+
   std::vector<std::vector<char>> cubins;
   cubins.reserve(artifacts.size());
-  for (auto &art : artifacts) {
+  for (std::size_t ai = 0; ai < artifacts.size(); ai++) {
+    auto &art = artifacts[ai];
     if (!art.cubin.empty()) {
       // Already resolved from the on-disk artifact cache by the codegen driver: no module was ever built for this
       // task, so there is nothing to compile or store.
       cubins.push_back(std::move(art.cubin));
       continue;
     }
-    auto cubin = get_or_build_construct_cubin(art.module);
+    auto cubin = std::move(built[ai]);
     // Persist the COMPLETE record (code + launch metadata). The JIT is the only component that holds the cubin and
     // codegen is the only one that holds the metadata, so the metadata is carried down here specifically so this
     // side can write a record sufficient to launch the task without any recompile.
