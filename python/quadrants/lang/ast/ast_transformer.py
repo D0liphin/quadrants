@@ -934,13 +934,15 @@ class ASTTransformer(Builder):
         ops_static = {
             ast.In: lambda l, r: l in r,
             ast.NotIn: lambda l, r: l not in r,
+            ast.Is: lambda l, r: l is r,
+            ast.IsNot: lambda l, r: l is not r,
         }
         if ctx.is_in_static_scope():
             ops = {**ops, **ops_static}
         operands = [node.left.ptr] + [comparator.ptr for comparator in node.comparators]
         val = True
         for i, node_op in enumerate(node.ops):
-            if isinstance(node_op, (ast.Is, ast.IsNot)):
+            if not ctx.is_in_static_scope() and isinstance(node_op, (ast.Is, ast.IsNot)):
                 name = "is" if isinstance(node_op, ast.Is) else "is not"
                 raise QuadrantsSyntaxError(f'Operator "{name}" in Quadrants scope is not supported.')
             l = operands[i]

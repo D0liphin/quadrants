@@ -159,6 +159,22 @@ def test_static_in():
 
 
 @test_utils.test()
+def test_static_is():
+    @qd.kernel
+    def foo(a: qd.template()) -> qd.i32:
+        b = 0
+        if qd.static(a is None):
+            b = 1
+        elif qd.static(a is not None):
+            b = 2
+        return b
+
+    assert foo(None) == 1
+    assert foo(0) == 2
+    assert foo(qd.i32) == 2
+
+
+@test_utils.test()
 def test_non_static_in():
     with pytest.raises(qd.QuadrantsCompilationError, match='"In" is only supported inside `qd.static`.'):
 

@@ -26,6 +26,8 @@ Because `use_fast_path` is a templated parameter, it is known at compile time. T
 
 Without `qd.static`, the condition would be evaluated at runtime for every thread, which is slower. In addition, the kernel will contain the code for both branches, which will increase register pressure, and likely reduce occupancy.
 
+Identity comparisons (`is` and `is not`) are supported only inside `qd.static()`. This lets a kernel test the identity of a compile-time value, for example `if qd.static(value is not None):`.
+
 ## Loop unrolling
 
 ```python
