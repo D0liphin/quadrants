@@ -647,9 +647,11 @@ class FuncBase:
             # See for reference: https://docs.python.org/3/c-api/long.html#c.PyLong_FromLong
             return 1, _is_cpython and -5 <= v <= 256
         needed_arg_fields = getattr(needed_arg_type, _FIELDS, None)
+        # We get the fields from the needed arg type, thus subclasses are allowed
         if needed_arg_fields is not None:
-            if provided_arg_type is not needed_arg_type:
-                raise QuadrantsRuntimeError("needed", needed_arg_type, "!= provided", provided_arg_type)
+            if provided_arg_type is not needed_arg_type and not issubclass(provided_arg_type, needed_arg_type):
+                # PERF: Check immediate case first (`is not needed_arg_type`), fallback to subclass
+                raise QuadrantsRuntimeTypeError("needed", needed_arg_type, "cannot be assigned the provided", provided_arg_type)
             is_frozen = needed_arg_type.__hash__ is not None
             idx = 0
             if is_frozen:
