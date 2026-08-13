@@ -181,7 +181,9 @@ def test_frozen_dc_unwrapped_cache_populated():
     assert not hasattr(state, "_qd_dc_unwrapped")
     noop(state)
     assert hasattr(state, "_qd_dc_unwrapped")
-    cached = state._qd_dc_unwrapped
+    cache = state._qd_dc_unwrapped
+    assert State in cache
+    cached = cache[State]
     assert "a" in cached
     assert cached["a"] is a
 

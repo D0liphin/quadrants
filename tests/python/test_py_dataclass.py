@@ -3330,3 +3330,33 @@ def test_kernel_disallows_unassignable_dataclass():
     other = Unrelated(x=0)
     with pytest.raises(QuadrantsRuntimeTypeError):
         mykernel(other)
+
+
+@test_utils.test()
+def test_frozen_dataclass_passed_to_multiple_ancestor_annotations():
+    @dataclass(frozen=True)
+    class QdSafe1:
+        x1: qd.types.NDArray[qd.i32, 1]
+
+    @dataclass(frozen=True)
+    class QdSafe2:
+        x2: qd.types.NDArray[qd.i32, 1]
+
+    @dataclass(frozen=True)
+    class Sub(QdSafe1, QdSafe2): ...
+
+    @qd.kernel
+    def mykernel1(dat: QdSafe1) -> None:
+        dat.x1[0] = 1
+
+    @qd.kernel
+    def mykernel2(dat: QdSafe2) -> None:
+        dat.x2[0] = 2
+
+    sub = Sub(x1=qd.ndarray(qd.i32, shape=(4,)), x2=qd.ndarray(qd.i32, shape=(4,)))
+    # mykernel1 and mykernel2 might use different caching mechanisms! Well, we
+    # hope that this is fine and still works.
+    mykernel1(sub)
+    mykernel2(sub)
+    assert sub.x1[0] == 1
+    assert sub.x2[0] == 2
