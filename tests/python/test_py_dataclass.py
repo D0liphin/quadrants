@@ -3315,6 +3315,29 @@ def test_kernel_accepts_subclass_of_annotated_frozen_dataclass_param():
 
 
 @test_utils.test()
+def test_kernel_accepts_data_oriented_subclass_of_dataclass_param():
+    # A @qd.data_oriented class subclassing a dataclasses.dataclass is still a subclass of the annotated type, so it
+    # should dispatch through the dataclass path: the kernel reads only the base's declared fields via getattr.
+    @dataclass
+    class QdSafe:
+        x: qd.types.NDArray[qd.i32, 1]
+
+    @qd.data_oriented
+    class DataOrientedSub(QdSafe):
+        pass
+
+    @qd.kernel
+    def mykernel(dat: QdSafe) -> None:
+        for i in range(4):
+            dat.x[i] = 7
+
+    sub = DataOrientedSub(x=qd.ndarray(qd.i32, shape=(4,)))
+    mykernel(sub)
+    assert sub.x[0] == 7
+    assert sub.x[3] == 7
+
+
+@test_utils.test()
 def test_kernel_disallows_unassignable_dataclass():
     @dataclass
     class Expected:
