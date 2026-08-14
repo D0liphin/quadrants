@@ -82,7 +82,7 @@ def test_ndarray_struct_not_skipped():
     fill(state, 42)
     np.testing.assert_array_equal(a.to_numpy(), [42, 42, 42, 42])
 
-    # _qd_all_field is a dict[annotated_type, bool]; the verdict for State must be falsy (absent or False)
+    # Verify the flag is False (not set or explicitly False)
     assert not getattr(state, "_qd_all_field", {}).get(State)
 
     fill(state, 99)
@@ -151,7 +151,7 @@ def test_mixed_field_and_ndarray_not_skipped():
     combine(state, out)
     np.testing.assert_array_equal(out.to_numpy(), [11, 22, 33, 44])
 
-    # Verdict for State must be falsy
+    # Verify flag is False
     assert not getattr(state, "_qd_all_field", {}).get(State)
 
 
