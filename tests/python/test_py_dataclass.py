@@ -3315,6 +3315,36 @@ def test_kernel_accepts_subclass_of_annotated_frozen_dataclass_param():
 
 
 @test_utils.test()
+def test_kernel_accepts_subclass_with_unsupported_final_app_field():
+    """A subclass may carry an application-only ``Final`` field of a type Quadrants cannot bake (e.g. ``Final[list]``).
+    Dispatch, specialization and hashing use only the annotated base's field set, so such a field must be ignored, not
+    validated. Regression: the frozen unwrapped-value cache gated its Final check on ``type(v)`` (the runtime
+    subclass), so ``subtree_has_final_fields`` validated the ignored field and raised ``TypeError``; it now gates on
+    the annotated base."""
+    from typing import Final
+
+    import numpy as np
+
+    @dataclass(frozen=True)
+    class Base:
+        x: qd.types.NDArray[qd.i32, 1]
+
+    @dataclass(frozen=True)
+    class Sub(Base):
+        extra: Final[list]  # unbakeable as a Quadrants Final field, but the kernel (annotated Base) never sees it
+
+    @qd.kernel
+    def fill(dat: Base):
+        for i in range(4):
+            dat.x[i] = 7
+
+    x = qd.ndarray(qd.i32, shape=(4,))
+    sub = Sub(x=x, extra=[1, 2, 3])
+    fill(sub)  # must not raise while validating the ignored ``extra`` field
+    np.testing.assert_array_equal(x.to_numpy(), [7, 7, 7, 7])
+
+
+@test_utils.test()
 def test_kernel_accepts_data_oriented_subclass_of_dataclass_param():
     # A @qd.data_oriented class subclassing a dataclasses.dataclass is still a subclass of the annotated type, so it
     # should dispatch through the dataclass path: the kernel reads only the base's declared fields via getattr.

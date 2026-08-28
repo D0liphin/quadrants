@@ -178,8 +178,13 @@ def _get_frozen_dc_unwrapped(v: Any, struct_cls: type, fields_dict: dict) -> dic
     ``unsafe_hash=True`` instance may also mutate an *ordinary* field between launches - a stale cache would keep
     sending the first-launch value. (Such a config always has a non-``Field`` scalar leaf, so ``_qd_all_field`` would
     be ``False`` anyway; leaving it unset defaults to ``False``, i.e. the full ``_recursive_set_args`` path.)
+
+    The Final gate is evaluated on the *annotated* type (``struct_cls``), not ``type(v)``: dispatch, specialization and
+    fast-cache hashing all use the annotated base's field set, so a subclass carrying an application-only ``Final``
+    field (even one of an unbakeable type such as ``Final[list]``) must be ignored here rather than validated - gating
+    on ``type(v)`` would reject the supported subclass pattern via ``subtree_has_final_fields``'s validation.
     """
-    if subtree_has_final_fields(type(v)):
+    if subtree_has_final_fields(struct_cls):
         return _compute_frozen_dc_unwrapped(v, fields_dict)
     cache = getattr(v, "_qd_dc_unwrapped", None)
     if cache is not None:
