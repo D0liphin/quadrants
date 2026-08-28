@@ -167,7 +167,8 @@ void export_lang(nb::module_ &m) {
       .def(nb::init<>())
       .def_rw("arch", &CompileConfig::arch,
               "Target backend the kernels run on (e.g. qd.cpu, qd.cuda, qd.vulkan, qd.metal). Defaults to qd.cpu when "
-              "arch is not specified.")
+              "arch is not specified. Also settable via the QD_ARCH environment variable; if both are set, this "
+              "argument takes precedence and a warning is logged.")
       .def_rw("opt_level", &CompileConfig::opt_level,
               "Quadrants IR optimization level. At 0, IR-level optimizations such as common-subexpression elimination "
               "are disabled; any value above 0 enables them. This is not an LLVM -O level.")
@@ -555,7 +556,10 @@ void export_lang(nb::module_ &m) {
       .def_prop_ro("compiled_kernel_data",
                    [](const CompileResult &self) -> const CompiledKernelData & { return self.compiled_kernel_data; })
       .def_ro("cache_hit", &CompileResult::cache_hit)
-      .def_ro("cache_key", &CompileResult::cache_key);
+      .def_ro("cache_key", &CompileResult::cache_key)
+      .def_ro("per_construct_total", &CompileResult::per_construct_total)
+      .def_ro("per_construct_cache_hit", &CompileResult::per_construct_cache_hit)
+      .def_ro("per_construct_recompiled", &CompileResult::per_construct_recompiled);
 
   nb::class_<Axis>(m, "Axis").def(nb::init<int>());
   nb::class_<SNode>(m, "SNodeCxx")

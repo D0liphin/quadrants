@@ -189,7 +189,7 @@ def test_frozen_dc_unwrapped_cache_populated():
 
 
 # ---------------------------------------------------------------------------
-# Template-key cache: verify _key is cached per annotated type (covariant reuse).
+# Template-key cache: verify _qd_spec_key is cached per annotated type (covariant reuse).
 # ---------------------------------------------------------------------------
 
 
@@ -221,14 +221,14 @@ def test_frozen_dc_template_key_cache_populated():
 
     sub = Sub(x1=qd.ndarray(qd.i32, shape=(4,)), x2=qd.ndarray(qd.f32, shape=(2, 2)))
 
-    assert not hasattr(sub, "_key")
+    assert not hasattr(sub, "_qd_spec_key")
     use1(sub)
-    assert Base1 in sub._key
+    assert Base1 in sub._qd_spec_key
     use2(sub)
-    assert Base1 in sub._key and Base2 in sub._key
+    assert Base1 in sub._qd_spec_key and Base2 in sub._qd_spec_key
 
     # Distinct field sets (i32/1D vs f32/2D) must yield distinct keys, i.e. neither annotation reused the other's.
-    assert sub._key[Base1] != sub._key[Base2]
+    assert sub._qd_spec_key[Base1] != sub._qd_spec_key[Base2]
 
 
 # ---------------------------------------------------------------------------
