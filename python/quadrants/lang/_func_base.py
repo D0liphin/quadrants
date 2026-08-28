@@ -102,10 +102,12 @@ _is_cpython = sys.implementation.name == "cpython"
 #    which fields are active and their (name, full_name, type) tuples. Reduces the 43-iteration filter loop to ~10-15
 #    direct entries.
 #
-# 2. **Unwrapped-value cache** (per-instance, stored as ``_qd_dc_unwrapped``, a ``dict[annotated_type, values]``): for
-#    a frozen dataclass, field values never change. Cache the unwrapped (post-``_unwrap()``) value for each field on
-#    the instance. Eliminates ``getattr`` + ``type() in _TENSOR_WRAPPER_TYPES`` + ``_unwrap()`` on every launch. Keyed
-#    by the annotated type so a subclass instance reused across different ancestor annotations stays correct.
+# 2. **Unwrapped-value cache** (per-instance, stored as ``_qd_dc_unwrapped``, an identity-keyed
+#    ``dict[id(annotated_type), (annotated_type, values)]``): for a frozen dataclass, field values never change. Cache
+#    the unwrapped (post-``_unwrap()``) value for each field on the instance. Eliminates ``getattr`` +
+#    ``type() in _TENSOR_WRAPPER_TYPES`` + ``_unwrap()`` on every launch. Keyed by ``id(annotated_type)`` (with a
+#    strong-ref + ``is`` guard) so a subclass instance reused across different ancestor annotations stays correct, even
+#    if a metaclass makes two ancestor class objects compare or hash equal.
 
 _frozen_dc_plans: dict[tuple[int, type, str], tuple[set[str], tuple[tuple[str, str, Any], ...]]] = {}
 
@@ -164,10 +166,12 @@ def _compute_frozen_dc_unwrapped(v: Any, fields_dict: dict) -> dict[str, Any]:
 def _get_frozen_dc_unwrapped(v: Any, struct_cls: type, fields_dict: dict) -> dict[str, Any]:
     """field_name -> unwrapped value for a frozen dataclass, cached on the instance.
 
-    The cache is keyed by the annotated type (``struct_cls``): one instance may be cached under several annotated
-    types, in particular if it has multiple base classes which act as multiple annotated types. Thus we store a
-    ``dict[annotated_ty, unwrapped]`` (and likewise for ``_qd_all_field``) so a subclass instance reused across
-    different ancestor annotations stays correct.
+    The cache is keyed by ``id(struct_cls)`` (the annotated type): one instance may be cached under several annotated
+    types, in particular if it has multiple base classes which act as multiple annotated types. Thus we store an
+    identity-keyed ``dict[id(annotated_ty), (annotated_ty, unwrapped)]`` (and likewise for ``_qd_all_field``) so a
+    subclass instance reused across different ancestor annotations stays correct - even if a metaclass makes two
+    ancestor class objects compare or hash equal. The stored type gives a strong-ref + ``is`` guard against a recycled
+    ``id`` (matching the ``_final_path_cache`` / ``_final_plan_cache`` pattern in ``_final_dataclass_fields``).
 
     A ``Final``-bearing subtree is exempt from the cache (and from the ``_qd_all_field`` shortcut): like the
     spec-key/offline-repr/mapper caches it must re-read every launch so ``Final``-value validation re-runs, and an
@@ -179,31 +183,32 @@ def _get_frozen_dc_unwrapped(v: Any, struct_cls: type, fields_dict: dict) -> dic
         return _compute_frozen_dc_unwrapped(v, fields_dict)
     cache = getattr(v, "_qd_dc_unwrapped", None)
     if cache is not None:
-        hit = cache.get(struct_cls)
-        if hit is not None:
-            return hit
+        hit = cache.get(id(struct_cls))
+        if hit is not None and hit[0] is struct_cls:  # identity guard: a recycled ``id`` / metaclass-eq must miss
+            return hit[1]
     unwrapped = _compute_frozen_dc_unwrapped(v, fields_dict)
     if cache is None:
         try:
-            object.__setattr__(v, "_qd_dc_unwrapped", {struct_cls: unwrapped})
+            object.__setattr__(v, "_qd_dc_unwrapped", {id(struct_cls): (struct_cls, unwrapped)})
         except AttributeError:
             pass
     else:
-        cache[struct_cls] = unwrapped
+        cache[id(struct_cls)] = (struct_cls, unwrapped)
     # Cache whether ALL unwrapped values are Fields (zero launch-context slots). This depends on which annotated type
-    # (field subset) is active, so it is keyed by ``struct_cls`` alongside the unwrapped values.
+    # (field subset) is active, so it is keyed by ``id(struct_cls)`` (with the same strong-ref + ``is`` guard).
     all_field_cache = getattr(v, "_qd_all_field", None)
-    if all_field_cache is None or struct_cls not in all_field_cache:
+    _af_hit = None if all_field_cache is None else all_field_cache.get(id(struct_cls))
+    if _af_hit is None or _af_hit[0] is not struct_cls:
         from quadrants.lang.field import Field as _Field  # pylint: disable=C0415
 
         _all_field = all(isinstance(fv, _Field) for fv in unwrapped.values())
         if all_field_cache is None:
             try:
-                object.__setattr__(v, "_qd_all_field", {struct_cls: _all_field})
+                object.__setattr__(v, "_qd_all_field", {id(struct_cls): (struct_cls, _all_field)})
             except (AttributeError, TypeError):
                 pass
         else:
-            all_field_cache[struct_cls] = _all_field
+            all_field_cache[id(struct_cls)] = (struct_cls, _all_field)
     return unwrapped
 
 

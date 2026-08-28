@@ -651,17 +651,17 @@ class Kernel(FuncBase):
                     # Optional ndarray + None is specialized away at compile time, so it consumes no runtime arg.
                     continue
                 # Shortcut: skip _recursive_set_args() when every field of this dataclass unwraps to a Field (zero
-                # launch-context slots). _qd_all_field is a dict[annotated_type, bool], so the shortcut fires only when
-                # the cached verdict was computed for THIS exact annotation - meaning _recursive_set_args() (which holds
-                # the provided-is-needed type check) already ran and passed for it. Reusing the same instance under a
-                # different dataclass annotation misses the shortcut and goes through the check.
+                # launch-context slots). _qd_all_field is an identity-keyed dict[id(annotated_type), (annotated_type,
+                # bool)], so the shortcut fires only when the cached verdict was computed for THIS exact annotation -
+                # meaning _recursive_set_args() (which holds the provided-is-needed type check) already ran and passed
+                # for it. Reusing the same instance under a different dataclass annotation misses the shortcut and goes
+                # through the check. The stored type is a strong-ref + ``is`` guard (a recycled id / metaclass-eq must
+                # not serve another annotation's verdict).
                 _all_field_cache = getattr(val, "_qd_all_field", None)
-                if (
-                    _all_field_cache is not None
-                    and getattr(needed_, _FIELDS, None) is not None
-                    and _all_field_cache.get(needed_)
-                ):
-                    continue
+                if _all_field_cache is not None and getattr(needed_, _FIELDS, None) is not None:
+                    _af_hit = _all_field_cache.get(id(needed_))
+                    if _af_hit is not None and _af_hit[0] is needed_ and _af_hit[1]:
+                        continue
                 # `graph_do_while_levels[*].cond_cpp_arg_id` is also populated at AST-build time (see
                 # `ASTTransformer.build_While` -> `_resolve_ndarray_kernel_arg_id`), so the launch path forwards it
                 # directly below without per-arg name matching here. This uniformly handles bare parameter conditions

@@ -423,17 +423,20 @@ def _extract_arg(raise_on_templated_floats: bool, arg: Any, annotation: Annotati
         # recursion that runs it on nested frozen dataclasses. A Final-bearing subtree is never served either - the
         # write below refuses to store one, so this read falls through and re-runs validation each launch.
         #
-        # Stored as a ``dict[annotation, key]`` to allow polymorphism on the passed dataclass: a subclass instance may
-        # be extracted against different ancestor annotations (different active field sets), each cached separately.
+        # Stored as an identity-keyed ``dict[id(annotation), (annotation, key)]`` to allow polymorphism on the passed
+        # dataclass: a subclass instance may be extracted against different ancestor annotations (different active field
+        # sets), each cached separately. Keying by ``id(annotation)`` with a strong-ref + ``is`` guard keeps two
+        # ancestors distinct even if a metaclass makes their class objects compare or hash equal, and pins the ``id``
+        # against recycling (matching the ``_final_path_cache`` / ``_final_plan_cache`` pattern).
         if is_frozen and not raise_on_templated_floats:
             try:
                 # Instance-level (not class-level): instances of one class may differ in memory layout. The reserved
                 # ``_qd_`` prefix avoids collision with a user field named ``_key``. Absent under ``slots=True``.
-                _key_hit = arg._qd_spec_key.get(annotation)
+                _key_hit = arg._qd_spec_key.get(id(annotation))
             except AttributeError:
                 _key_hit = None
-            if _key_hit is not None:
-                return _key_hit
+            if _key_hit is not None and _key_hit[0] is annotation:
+                return _key_hit[1]
         # ``Final[T]`` fields drive the key by *value*; other fields keep the recursive ``_extract_arg``. PERF: with no
         # Final fields (the common case) we take the original comprehension verbatim.
         final_names = final_field_names(annotation)
@@ -482,7 +485,8 @@ def _extract_arg(raise_on_templated_floats: bool, arg: Any, annotation: Annotati
                 ]
             )
         # Store the cache only for a ``Final``-free subtree; a Final-bearing one must revalidate every launch, so we
-        # never store one (making the read above fall through). Keyed by annotation for subclass polymorphism.
+        # never store one (making the read above fall through). Keyed by ``id(annotation)`` (with a strong-ref + ``is``
+        # guard on read) for subclass polymorphism.
         if is_frozen and not subtree_has_final_fields(annotation):
             try:
                 _key_map = arg._qd_spec_key
@@ -490,12 +494,12 @@ def _extract_arg(raise_on_templated_floats: bool, arg: Any, annotation: Annotati
                 _key_map = None
             if _key_map is None:
                 try:
-                    object.__setattr__(arg, "_qd_spec_key", {annotation: key})
+                    object.__setattr__(arg, "_qd_spec_key", {id(annotation): (annotation, key)})
                 except AttributeError:
                     # Impossible to store _qd_spec_key at instance-level if 'slots=True'. It is recomputed each time.
                     pass
             else:
-                _key_map[annotation] = key
+                _key_map[id(annotation)] = (annotation, key)
         return key
     if annotation_type is sparse_matrix_builder:
         return arg.dtype
