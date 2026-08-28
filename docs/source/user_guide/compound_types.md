@@ -147,12 +147,14 @@ A `dataclasses.dataclass` may be either non-frozen (the default) or frozen (`@da
 You are able to pass any subclass of the annotated dataclass type. This is especially useful for cases where only a subset of your class is valid in quadrants, as below:
 
 ```python
-@dataclass(frozen=True)  # frozen not needed!
+@dataclass(frozen=True)  # the base need not be frozen for subclassing to work
 class Position:
     x: qd.types.NDArray[qd.math.vec3, 1]
 
-# Any type of dataclass or non-dataclass class works here
-# @dataclass(frozen=True) 
+# A dataclass subclass of a frozen base must itself be frozen (Python forbids inheriting a
+# non-frozen dataclass from a frozen one). A plain, non-dataclass subclass also works and
+# needs no decorator.
+@dataclass(frozen=True)
 class Particle(Position):
     name: list[str]
 
@@ -161,6 +163,11 @@ def update_positions(pos: Position) -> None:
     for i in range(pos.x.shape[0]):
         update_position(pos.x, i)
 ```
+
+Note: when the annotated type is frozen, the flattened launch arguments are cached on the instance on first
+use. Do not rebind a field after the first launch; the kernel would keep using the stale cached value. Frozen
+dataclasses forbid rebinding by design, so this only affects code that deliberately bypasses that (e.g.
+`object.__setattr__`, or an `unsafe_hash=True` non-frozen dataclass).
 
 ### Under the hood
 
