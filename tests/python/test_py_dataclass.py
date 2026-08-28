@@ -5027,6 +5027,44 @@ def test_final_str_field_does_not_disable_offline_fastcache():
 
 
 @test_utils.test()
+def test_subclass_extra_field_offline_fastcache_uses_annotated_field_set():
+    """A subclass instance passed where a *base* dataclass is annotated must fast-cache against the base's field set.
+    ``dataclass_to_repr`` iterates the runtime type by default, so a subclass that adds a non-fastcacheable field
+    (``list``) returns None (a ``[FASTCACHE][PARAM_INVALID]`` path) and disables the offline cache for the whole call -
+    even though launch dispatches the instance via the base's fields and never reads the extra one. Passing the
+    annotated base as ``annotated_type`` restricts hashing to those fields, so the subclass hashes *identically* to a
+    plain base instance and stays offline-fastcacheable; the extra field is absent from the key (a different value in it
+    does not change the repr). A ``Final`` base field confirms the base's fields still drive the key by value."""
+    from typing import Final
+
+    from quadrants.lang._fast_caching.args_hasher import dataclass_to_repr
+
+    @dataclass(frozen=True)
+    class Base:
+        scale: Final[int]  # baked -> its value drives the offline key
+
+    @dataclass(frozen=True)
+    class Sub(Base):
+        name: list  # extra application-only field; not fastcacheable on its own and never seen by the kernel
+
+    base_repr = dataclass_to_repr(False, (), Base(scale=1))
+    assert base_repr is not None and "scale" in base_repr
+
+    # Runtime-type hashing (no annotation) trips on the ``list`` field and disables the offline cache.
+    assert dataclass_to_repr(False, (), Sub(scale=1, name=["a"])) is None
+
+    # Hashing against the annotated base drops the extra field, so the subclass hashes identically to its base.
+    assert dataclass_to_repr(False, (), Sub(scale=1, name=["a"]), Base) == base_repr
+    assert (
+        dataclass_to_repr(False, (), Sub(scale=1, name=["b"]), Base) == base_repr
+    ), "the extra (non-annotated) field must not affect the offline key"
+    # The base's own field still drives the key: a different ``Final`` value splits it.
+    assert (
+        dataclass_to_repr(False, (), Sub(scale=2, name=["a"]), Base) != base_repr
+    ), "a baked base field must still split the offline key by value"
+
+
+@test_utils.test()
 def test_final_exact_baked_type_membership_is_identity_not_equality():
     """A ``Final`` scalar recognises an *exact* builtin (``bool``/``int``/``float``/``str``) by class *identity*, never
     ``==``. A subclass whose metaclass makes the class compare equal to a builtin (``X == int``) must not be mistaken

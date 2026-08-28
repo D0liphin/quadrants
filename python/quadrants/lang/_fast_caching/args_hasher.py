@@ -75,14 +75,26 @@ def _mark_should_warn() -> None:
     _should_warn = True
 
 
-def dataclass_to_repr(raise_on_templated_floats: bool, path: tuple[str, ...], arg: Any) -> str | None:
+def dataclass_to_repr(
+    raise_on_templated_floats: bool, path: tuple[str, ...], arg: Any, annotated_type: type | None = None
+) -> str | None:
     # PERF: For frozen dataclasses, the repr never changes. Cache it on the instance to avoid repeated
     # ``dataclasses.fields()`` calls (which are slow due to extra runtime checks — see _template_mapper_hotpath.py
     # module docstring). The cache is stored as ``_qd_dc_repr`` via ``object.__setattr__`` to bypass frozen guards.
     # A cached ``None`` is stored as the sentinel ``_DC_REPR_NONE`` to distinguish "not yet computed" from
     # "computed but not fast-cacheable".
+    #
+    # ``annotated_type`` (when given) is the *declared* dataclass type of this argument. A subclass instance may be
+    # passed where a base dataclass is annotated; the kernel is dispatched via the base's field set, so hash only
+    # those fields. This keeps a subclass carrying extra application-only fields (e.g. ``name: list[str]``)
+    # fast-cacheable instead of tripping ``[FASTCACHE][PARAM_INVALID]`` on a field the kernel never reads.
+    field_source = annotated_type if annotated_type is not None else type(arg)
     is_frozen = type(arg).__hash__ is not None
-    if is_frozen:
+    # Only serve/populate the per-instance cache when the declared field set matches the runtime type. The same
+    # subclass instance may be passed under a different base elsewhere (a different field subset -> a different repr),
+    # so a subclass view is recomputed each call rather than risk serving another view's cached repr.
+    use_instance_cache = is_frozen and field_source is type(arg)
+    if use_instance_cache:
         cached = getattr(arg, "_qd_dc_repr", None)
         if cached is _DC_REPR_NONE:
             return None
@@ -90,12 +102,12 @@ def dataclass_to_repr(raise_on_templated_floats: bool, path: tuple[str, ...], ar
             return cached
     # A baked ``Final[T]`` field's *value* must be in the offline cache key too, else a kernel baked with one value
     # loads for a config carrying another. Test: ``test_final_field_value_is_part_of_offline_fastcache_key``.
-    final_names = final_field_names(type(arg))
+    final_names = final_field_names(field_source)
     # Never cache a Final-bearing subtree's repr: it must recompute each launch to re-run ``final_scalar_key``'s
     # validation, so we never store one (the read above then falls through).
-    cacheable = is_frozen and not subtree_has_final_fields(type(arg))
+    cacheable = use_instance_cache and not subtree_has_final_fields(field_source)
     repr_l = []
-    for field in dataclasses.fields(arg):
+    for field in dataclasses.fields(field_source):
         child_value = getattr(arg, field.name)
         if field.name in final_names:
             # Serialize via ``final_scalar_key`` (collision-safe, process-stable) and skip ``stringify_obj_type``: it
@@ -193,7 +205,16 @@ def stringify_obj_type(
         _mark_warn_if_not_tensor_annotation(arg_meta)
         return None
     if dataclasses.is_dataclass(obj):
-        return dataclass_to_repr(raise_on_templated_floats, path, obj)
+        # Hash against the *declared* dataclass type when the arg is annotated as one, so a subclass carrying extra
+        # application-only fields still fast-caches (launch dispatches it via the base's field set too). Only applies
+        # at the top level / where the annotation is a dataclass; nested and data_oriented children keep runtime-type
+        # hashing (arg_meta is None or a Template there).
+        annotated_type = None
+        if arg_meta is not None:
+            ann = arg_meta.annotation
+            if isinstance(ann, type) and dataclasses.is_dataclass(ann) and isinstance(obj, ann):
+                annotated_type = ann
+        return dataclass_to_repr(raise_on_templated_floats, path, obj, annotated_type)
     if is_data_oriented(obj):
         child_repr_l = ["da"]
         _dict = {}
