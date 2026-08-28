@@ -1,8 +1,7 @@
 """Tests for the _qd_all_field kernel launch shortcut.
 
-Verifies that the per-instance ``_qd_all_field`` cache (an identity-keyed ``dict[id(annotated_type), (annotated_type,
-bool)]`` which allows kernel.py to skip ``_recursive_set_args`` entirely for all-Field frozen dataclass structs) does
-not cause incorrect behavior in edge cases:
+Verifies that the per-instance ``_qd_all_field`` cache (which lets kernel.py skip ``_recursive_set_args`` entirely for
+all-Field frozen dataclass structs) does not cause incorrect behavior in edge cases:
 
 - Struct mixing Field tensors with scalar (float/int) fields
 - Struct mixing Field tensors with Ndarray tensors
@@ -24,7 +23,7 @@ from tests import test_utils
 
 
 def _cached_all_field(obj, annotated):
-    """Read the identity-keyed ``_qd_all_field`` verdict (stored as ``{id(ty): (ty, bool)}``), or None if absent."""
+    """Read the ``_qd_all_field`` verdict for ``annotated`` (identity-guarded), or None if absent."""
     entry = getattr(obj, "_qd_all_field", {}).get(id(annotated))
     return entry[1] if entry is not None and entry[0] is annotated else None
 

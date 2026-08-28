@@ -182,7 +182,6 @@ def test_frozen_dc_unwrapped_cache_populated():
     noop(state)
     assert hasattr(state, "_qd_dc_unwrapped")
     cache = state._qd_dc_unwrapped
-    # Identity-keyed: ``{id(annotated_type): (annotated_type, unwrapped)}``.
     assert id(State) in cache
     retained_ty, cached = cache[id(State)]
     assert retained_ty is State
@@ -225,7 +224,6 @@ def test_frozen_dc_template_key_cache_populated():
 
     assert not hasattr(sub, "_qd_spec_key")
     use1(sub)
-    # Identity-keyed: ``{id(annotation): (annotation, key)}``.
     assert id(Base1) in sub._qd_spec_key
     use2(sub)
     assert id(Base1) in sub._qd_spec_key and id(Base2) in sub._qd_spec_key
@@ -271,7 +269,6 @@ def test_frozen_dc_all_field_cache_per_annotated_type():
     sub = Sub(a=a, b=b)
 
     use1(sub)
-    # Identity-keyed: ``{id(annotated_type): (annotated_type, all_field_verdict)}``.
     assert sub._qd_all_field == {id(Base1): (Base1, True)}
     use2(sub)
     # Second annotation gets its own entry rather than reusing Base1's shortcut verdict.
@@ -288,11 +285,10 @@ def test_frozen_dc_all_field_cache_per_annotated_type():
 
 @test_utils.test(arch=qd.cpu)
 def test_frozen_dc_caches_identity_keyed_against_metaclass_eq():
-    """The per-annotation launch caches are keyed by ``id(annotated_type)`` with a strong-ref + ``is`` guard, so two
-    distinct ancestor dataclasses whose metaclass makes their class objects compare *and* hash equal do not collide - a
-    plain class-keyed dict would serve one ancestor's cached view for the other. Exercised directly on
-    ``_get_frozen_dc_unwrapped``, which populates both ``_qd_dc_unwrapped`` and ``_qd_all_field``; the sibling
-    ``_qd_spec_key`` cache (in ``_template_mapper_hotpath``) uses the identical keying."""
+    """Two distinct ancestor dataclasses whose metaclass makes them compare *and* hash equal must not collide in the
+    per-annotation caches: a class-keyed dict would serve one ancestor's cached view for the other, but ``id()`` keying
+    with an ``is`` guard keeps them separate. Exercised on ``_get_frozen_dc_unwrapped`` (``_qd_dc_unwrapped`` and
+    ``_qd_all_field``); ``_qd_spec_key`` uses identical keying."""
     from quadrants.lang._func_base import _get_frozen_dc_unwrapped
 
     class EqMeta(type):

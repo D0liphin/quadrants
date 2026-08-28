@@ -650,13 +650,9 @@ class Kernel(FuncBase):
                 ):
                     # Optional ndarray + None is specialized away at compile time, so it consumes no runtime arg.
                     continue
-                # Shortcut: skip _recursive_set_args() when every field of this dataclass unwraps to a Field (zero
-                # launch-context slots). _qd_all_field is an identity-keyed dict[id(annotated_type), (annotated_type,
-                # bool)], so the shortcut fires only when the cached verdict was computed for THIS exact annotation -
-                # meaning _recursive_set_args() (which holds the provided-is-needed type check) already ran and passed
-                # for it. Reusing the same instance under a different dataclass annotation misses the shortcut and goes
-                # through the check. The stored type is a strong-ref + ``is`` guard (a recycled id / metaclass-eq must
-                # not serve another annotation's verdict).
+                # An all-Field dataclass unwraps to zero launch-context slots, so skip _recursive_set_args(). That also
+                # skips its provided-is-needed type check, so only shortcut when _qd_all_field is cached True for THIS
+                # exact annotation (proof the check already ran and passed for it) - hence the per-annotation id() key.
                 _all_field_cache = getattr(val, "_qd_all_field", None)
                 if _all_field_cache is not None and getattr(needed_, _FIELDS, None) is not None:
                     _af_hit = _all_field_cache.get(id(needed_))

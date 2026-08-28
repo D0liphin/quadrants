@@ -423,11 +423,9 @@ def _extract_arg(raise_on_templated_floats: bool, arg: Any, annotation: Annotati
         # recursion that runs it on nested frozen dataclasses. A Final-bearing subtree is never served either - the
         # write below refuses to store one, so this read falls through and re-runs validation each launch.
         #
-        # Stored as an identity-keyed ``dict[id(annotation), (annotation, key)]`` to allow polymorphism on the passed
-        # dataclass: a subclass instance may be extracted against different ancestor annotations (different active field
-        # sets), each cached separately. Keying by ``id(annotation)`` with a strong-ref + ``is`` guard keeps two
-        # ancestors distinct even if a metaclass makes their class objects compare or hash equal, and pins the ``id``
-        # against recycling (matching the ``_final_path_cache`` / ``_final_plan_cache`` pattern).
+        # Keyed by ``id(annotation)`` so a subclass extracted against different ancestor annotations caches a separate
+        # key per view; the stored annotation is identity-checked on read, so a metaclass-equal ancestor or a recycled
+        # ``id`` cannot return the wrong key.
         if is_frozen and not raise_on_templated_floats:
             try:
                 # Instance-level (not class-level): instances of one class may differ in memory layout. The reserved
@@ -485,8 +483,7 @@ def _extract_arg(raise_on_templated_floats: bool, arg: Any, annotation: Annotati
                 ]
             )
         # Store the cache only for a ``Final``-free subtree; a Final-bearing one must revalidate every launch, so we
-        # never store one (making the read above fall through). Keyed by ``id(annotation)`` (with a strong-ref + ``is``
-        # guard on read) for subclass polymorphism.
+        # never store one (making the read above fall through).
         if is_frozen and not subtree_has_final_fields(annotation):
             try:
                 _key_map = arg._qd_spec_key

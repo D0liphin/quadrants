@@ -84,15 +84,12 @@ def dataclass_to_repr(
     # A cached ``None`` is stored as the sentinel ``_DC_REPR_NONE`` to distinguish "not yet computed" from
     # "computed but not fast-cacheable".
     #
-    # ``annotated_type`` (when given) is the *declared* dataclass type of this argument. A subclass instance may be
-    # passed where a base dataclass is annotated; the kernel is dispatched via the base's field set, so hash only
-    # those fields. This keeps a subclass carrying extra application-only fields (e.g. ``name: list[str]``)
-    # fast-cacheable instead of tripping ``[FASTCACHE][PARAM_INVALID]`` on a field the kernel never reads.
+    # Hash the *declared* type's fields (``annotated_type``) when given, not the runtime subclass's: a subclass with
+    # extra app-only fields would otherwise trip PARAM_INVALID and lose fast-caching on a field the kernel never reads.
     field_source = annotated_type if annotated_type is not None else type(arg)
     is_frozen = type(arg).__hash__ is not None
-    # Only serve/populate the per-instance cache when the declared field set matches the runtime type. The same
-    # subclass instance may be passed under a different base elsewhere (a different field subset -> a different repr),
-    # so a subclass view is recomputed each call rather than risk serving another view's cached repr.
+    # Cache on the instance only for the runtime type's own view: the same subclass may be passed under a different base
+    # elsewhere, needing a different repr, so subclass-under-base views are recomputed instead of cached.
     use_instance_cache = is_frozen and field_source is type(arg)
     if use_instance_cache:
         cached = getattr(arg, "_qd_dc_repr", None)
@@ -205,10 +202,8 @@ def stringify_obj_type(
         _mark_warn_if_not_tensor_annotation(arg_meta)
         return None
     if dataclasses.is_dataclass(obj):
-        # Hash against the *declared* dataclass type when the arg is annotated as one, so a subclass carrying extra
-        # application-only fields still fast-caches (launch dispatches it via the base's field set too). Only applies
-        # at the top level / where the annotation is a dataclass; nested and data_oriented children keep runtime-type
-        # hashing (arg_meta is None or a Template there).
+        # Pass the declared dataclass type so an annotated subclass hashes via the base's fields. Nested / data_oriented
+        # children have no dataclass annotation here (arg_meta is None or Template), so they fall back to runtime type.
         annotated_type = None
         if arg_meta is not None:
             ann = arg_meta.annotation

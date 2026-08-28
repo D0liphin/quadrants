@@ -3317,10 +3317,8 @@ def test_kernel_accepts_subclass_of_annotated_frozen_dataclass_param():
 @test_utils.test()
 def test_kernel_accepts_subclass_with_unsupported_final_app_field():
     """A subclass may carry an application-only ``Final`` field of a type Quadrants cannot bake (e.g. ``Final[list]``).
-    Dispatch, specialization and hashing use only the annotated base's field set, so such a field must be ignored, not
-    validated. Regression: the frozen unwrapped-value cache gated its Final check on ``type(v)`` (the runtime
-    subclass), so ``subtree_has_final_fields`` validated the ignored field and raised ``TypeError``; it now gates on
-    the annotated base."""
+    Only the annotated base's fields reach the kernel, so the extra ``Final`` field must be ignored, not validated
+    (validating it would reject the supported subclass pattern)."""
     from typing import Final
 
     import numpy as np
@@ -5058,13 +5056,10 @@ def test_final_str_field_does_not_disable_offline_fastcache():
 
 @test_utils.test()
 def test_subclass_extra_field_offline_fastcache_uses_annotated_field_set():
-    """A subclass instance passed where a *base* dataclass is annotated must fast-cache against the base's field set.
-    ``dataclass_to_repr`` iterates the runtime type by default, so a subclass that adds a non-fastcacheable field
-    (``list``) returns None (a ``[FASTCACHE][PARAM_INVALID]`` path) and disables the offline cache for the whole call -
-    even though launch dispatches the instance via the base's fields and never reads the extra one. Passing the
-    annotated base as ``annotated_type`` restricts hashing to those fields, so the subclass hashes *identically* to a
-    plain base instance and stays offline-fastcacheable; the extra field is absent from the key (a different value in it
-    does not change the repr). A ``Final`` base field confirms the base's fields still drive the key by value."""
+    """A subclass passed where a *base* dataclass is annotated must fast-cache against the base's field set. Without an
+    ``annotated_type``, ``dataclass_to_repr`` hashes the runtime type, so a subclass adding a non-fastcacheable field
+    (``list``) returns None and disables the offline cache. Passing the base restricts hashing to its fields: the
+    subclass then hashes identically to a plain base instance, and the extra field cannot affect the key."""
     from typing import Final
 
     from quadrants.lang._fast_caching.args_hasher import dataclass_to_repr

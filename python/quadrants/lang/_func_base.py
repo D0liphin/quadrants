@@ -102,12 +102,9 @@ _is_cpython = sys.implementation.name == "cpython"
 #    which fields are active and their (name, full_name, type) tuples. Reduces the 43-iteration filter loop to ~10-15
 #    direct entries.
 #
-# 2. **Unwrapped-value cache** (per-instance, stored as ``_qd_dc_unwrapped``, an identity-keyed
-#    ``dict[id(annotated_type), (annotated_type, values)]``): for a frozen dataclass, field values never change. Cache
-#    the unwrapped (post-``_unwrap()``) value for each field on the instance. Eliminates ``getattr`` +
-#    ``type() in _TENSOR_WRAPPER_TYPES`` + ``_unwrap()`` on every launch. Keyed by ``id(annotated_type)`` (with a
-#    strong-ref + ``is`` guard) so a subclass instance reused across different ancestor annotations stays correct, even
-#    if a metaclass makes two ancestor class objects compare or hash equal.
+# 2. **Unwrapped-value cache** (per-instance ``_qd_dc_unwrapped``): for a frozen dataclass, field values never change,
+#    so cache each field's unwrapped (post-``_unwrap()``) value, eliminating ``getattr`` + ``_unwrap()`` per launch.
+#    Keyed by ``id(annotated_type)`` so one instance reused under several ancestor annotations keeps a per-view entry.
 
 _frozen_dc_plans: dict[tuple[int, type, str], tuple[set[str], tuple[tuple[str, str, Any], ...]]] = {}
 
@@ -166,12 +163,9 @@ def _compute_frozen_dc_unwrapped(v: Any, fields_dict: dict) -> dict[str, Any]:
 def _get_frozen_dc_unwrapped(v: Any, struct_cls: type, fields_dict: dict) -> dict[str, Any]:
     """field_name -> unwrapped value for a frozen dataclass, cached on the instance.
 
-    The cache is keyed by ``id(struct_cls)`` (the annotated type): one instance may be cached under several annotated
-    types, in particular if it has multiple base classes which act as multiple annotated types. Thus we store an
-    identity-keyed ``dict[id(annotated_ty), (annotated_ty, unwrapped)]`` (and likewise for ``_qd_all_field``) so a
-    subclass instance reused across different ancestor annotations stays correct - even if a metaclass makes two
-    ancestor class objects compare or hash equal. The stored type gives a strong-ref + ``is`` guard against a recycled
-    ``id`` (matching the ``_final_path_cache`` / ``_final_plan_cache`` pattern in ``_final_dataclass_fields``).
+    Keyed by ``id(struct_cls)`` so a subclass instance reused under several ancestor annotations keeps a distinct entry
+    per view. The stored ``(struct_cls, ...)`` tuple is identity-checked on read, so a recycled ``id`` or a metaclass
+    that makes two ancestors compare/hash equal cannot serve the wrong view.
 
     A ``Final``-bearing subtree is exempt from the cache (and from the ``_qd_all_field`` shortcut): like the
     spec-key/offline-repr/mapper caches it must re-read every launch so ``Final``-value validation re-runs, and an
@@ -179,17 +173,15 @@ def _get_frozen_dc_unwrapped(v: Any, struct_cls: type, fields_dict: dict) -> dic
     sending the first-launch value. (Such a config always has a non-``Field`` scalar leaf, so ``_qd_all_field`` would
     be ``False`` anyway; leaving it unset defaults to ``False``, i.e. the full ``_recursive_set_args`` path.)
 
-    The Final gate is evaluated on the *annotated* type (``struct_cls``), not ``type(v)``: dispatch, specialization and
-    fast-cache hashing all use the annotated base's field set, so a subclass carrying an application-only ``Final``
-    field (even one of an unbakeable type such as ``Final[list]``) must be ignored here rather than validated - gating
-    on ``type(v)`` would reject the supported subclass pattern via ``subtree_has_final_fields``'s validation.
+    The Final gate uses the annotated ``struct_cls``, not ``type(v)``: only the base's fields reach the kernel, so a
+    subclass's application-only ``Final`` field (e.g. an unbakeable ``Final[list]``) must be ignored, not validated.
     """
     if subtree_has_final_fields(struct_cls):
         return _compute_frozen_dc_unwrapped(v, fields_dict)
     cache = getattr(v, "_qd_dc_unwrapped", None)
     if cache is not None:
         hit = cache.get(id(struct_cls))
-        if hit is not None and hit[0] is struct_cls:  # identity guard: a recycled ``id`` / metaclass-eq must miss
+        if hit is not None and hit[0] is struct_cls:  # identity guard against a recycled id
             return hit[1]
     unwrapped = _compute_frozen_dc_unwrapped(v, fields_dict)
     if cache is None:
@@ -199,8 +191,8 @@ def _get_frozen_dc_unwrapped(v: Any, struct_cls: type, fields_dict: dict) -> dic
             pass
     else:
         cache[id(struct_cls)] = (struct_cls, unwrapped)
-    # Cache whether ALL unwrapped values are Fields (zero launch-context slots). This depends on which annotated type
-    # (field subset) is active, so it is keyed by ``id(struct_cls)`` (with the same strong-ref + ``is`` guard).
+    # Cache whether ALL unwrapped values are Fields (zero launch-context slots); this depends on the active field
+    # subset, so it is keyed per annotated type like the unwrapped values above.
     all_field_cache = getattr(v, "_qd_all_field", None)
     _af_hit = None if all_field_cache is None else all_field_cache.get(id(struct_cls))
     if _af_hit is None or _af_hit[0] is not struct_cls:
