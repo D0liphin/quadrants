@@ -153,9 +153,8 @@ You are able to pass any subclass of the annotated dataclass type. This is espec
 class Position:
     x: qd.types.NDArray[qd.math.vec3, 1]
 
-# A dataclass subclass of a frozen base must itself be frozen (Python forbids inheriting a
-# non-frozen dataclass from a frozen one). A plain, non-dataclass subclass also works and
-# needs no decorator.
+# A dataclass subclass of a frozen base must itself be frozen (Python forbids inheriting a non-frozen dataclass from a
+# frozen one). A plain, non-dataclass subclass also works and needs no decorator.
 @dataclass(frozen=True)
 class Particle(Position):
     name: list[str]
