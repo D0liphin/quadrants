@@ -5061,7 +5061,10 @@ def test_subclass_extra_field_offline_fastcache_uses_annotated_field_set():
     then hashes identically to a plain base instance, and the extra field cannot affect the key."""
     from typing import Final
 
-    from quadrants.lang._fast_caching.args_hasher import _FAIL_FASTCACHE, dataclass_to_repr
+    from quadrants.lang._fast_caching.args_hasher import (
+        _FAIL_FASTCACHE,
+        dataclass_to_repr,
+    )
 
     @dataclass(frozen=True)
     class Base:
