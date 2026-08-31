@@ -701,7 +701,9 @@ class FuncBase:
         if needed_arg_fields is not None:
             if provided_arg_type is not needed_arg_type and not issubclass(provided_arg_type, needed_arg_type):
                 # PERF: Check immediate case first (`is not needed_arg_type`), fallback to subclass
-                raise QuadrantsRuntimeTypeError("needed", needed_arg_type, "cannot be assigned the provided", provided_arg_type)
+                raise QuadrantsRuntimeTypeError(
+                    "needed", needed_arg_type, "cannot be assigned the provided", provided_arg_type
+                )
             # Must agree with the compile-time gate (``_rebinding_is_prevented``): ``__hash__ is not None`` alone
             # disagrees for a ``frozen=True`` class that also hand-sets ``__hash__ = None`` (compile bakes its ``Final``
             # fields, so launch must take the frozen plan too). The ``or`` only runs when ``__hash__ is None``.

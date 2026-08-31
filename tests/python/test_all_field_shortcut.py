@@ -27,6 +27,7 @@ def _cached_all_field(obj, annotated):
     entry = getattr(obj, "_qd_all_field", {}).get(id(annotated))
     return entry[1] if entry is not None and entry[0] is annotated else None
 
+
 # ---------------------------------------------------------------------------
 # All-Field struct with qd.Tensor: shortcut should fire, kernel must work.
 # ---------------------------------------------------------------------------
