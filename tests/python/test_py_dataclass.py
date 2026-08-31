@@ -3405,8 +3405,7 @@ def test_frozen_dataclass_passed_to_multiple_ancestor_annotations():
         dat.x2[0] = 2
 
     sub = Sub(x1=qd.ndarray(qd.i32, shape=(4,)), x2=qd.ndarray(qd.i32, shape=(4,)))
-    # mykernel1 and mykernel2 might use different caching mechanisms! Well, we
-    # hope that this is fine and still works.
+    # mykernel1 and mykernel2 might use different caching mechanisms! Well, we hope that this is fine and still works.
     mykernel1(sub)
     mykernel2(sub)
     assert sub.x1[0] == 1
